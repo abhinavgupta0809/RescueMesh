@@ -7,7 +7,11 @@ import { createAdapters } from '../adapters/index.js';
 import { GeminiClient, type FetchLike } from '../adapters/gemini.js';
 import type { GeminiConfig } from '../config.js';
 import { World } from '../world.js';
-import { DeliberationOrchestrator } from './orchestrator.js';
+import {
+  DELIBERATION_DEFAULTS,
+  DeliberationOrchestrator,
+  mapWithConcurrency
+} from './orchestrator.js';
 
 const config: GeminiConfig = {
   apiKey: 'test-key-not-a-real-credential',
@@ -89,10 +93,15 @@ const happyPath = () =>
 const fixedWorld = () =>
   new World(new SimulationEngine({ clock: createFixedClock('2026-07-18T18:40:00-04:00') }));
 
-const build = (fetchImpl?: FetchLike, world = fixedWorld()) => {
+const build = (
+  fetchImpl?: FetchLike,
+  world = fixedWorld(),
+  limits = { ...DELIBERATION_DEFAULTS, retryBackoffMs: 1 }
+) => {
   const orchestrator = new DeliberationOrchestrator(
     world,
-    fetchImpl ? new GeminiClient(config, fetchImpl) : null
+    fetchImpl ? new GeminiClient(config, fetchImpl) : null,
+    limits
   );
   const app = createApp({ adapters: createAdapters(null), world, deliberation: orchestrator });
   return { app, world, orchestrator };
@@ -228,14 +237,14 @@ describe('three rounds over one frozen snapshot', () => {
 
 describe('failure handling', () => {
   it('substitutes one failing chief from the fixture and marks the session degraded', async () => {
-    let position = 0;
+    // Rescue Chief fails on every attempt, so the retry cannot rescue it and the
+    // fixture must stand in. Every other role succeeds normally.
     const gemini = scriptedFetch((system) => {
-      if (system.includes('opening position')) {
-        position += 1;
-        if (position === 2) return { status: 503 };
+      if (isReview(system)) return { text: JSON.stringify(RESPONSE) };
+      if (isInitial(system)) {
+        if (system.includes('Rescue Chief')) return { status: 503 };
         return { text: JSON.stringify(POSITION) };
       }
-      if (system.includes('read the other chiefs')) return { text: JSON.stringify(RESPONSE) };
       return { text: JSON.stringify(BRIEF) };
     });
     const { app } = build(gemini.impl);
@@ -283,10 +292,12 @@ describe('failure handling', () => {
     const world = fixedWorld();
     const orchestrator = new DeliberationOrchestrator(
       world,
-      new GeminiClient({ ...config, timeoutMs: 20 }, gemini.impl)
+      new GeminiClient({ ...config, timeoutMs: 20 }, gemini.impl),
+      { ...DELIBERATION_DEFAULTS, retryBackoffMs: 1 }
     );
     const app = createApp({ adapters: createAdapters(null), world, deliberation: orchestrator });
     const session = await settle(app, (await startSim(app)).sessionId);
+    // retried once, still too slow, so the fixture stands in
     expect(session.status).toBe('degraded');
     expect(session.errors.some((e) => e.code === 'timeout')).toBe(true);
   });
@@ -492,5 +503,209 @@ describe('final plan and the approval boundary', () => {
       .expect(200);
     expect(again.body.duplicate).toBe(true);
     expect(world.scenario.plans.filter((p) => p.status === 'proposed')).toHaveLength(1);
+  });
+});
+
+describe('rate-limit hardening', () => {
+  it('never exceeds the configured concurrency within a round', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const gemini = scriptedFetch(() => ({ delayMs: 15 }));
+    const impl: FetchLike = async (url, init) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      try {
+        const body = JSON.parse(String(init.body)) as {
+          systemInstruction: { parts: { text: string }[] };
+        };
+        const system = body.systemInstruction.parts[0]?.text ?? '';
+        const text = isReview(system)
+          ? JSON.stringify(RESPONSE)
+          : isInitial(system)
+            ? JSON.stringify(POSITION)
+            : JSON.stringify(BRIEF);
+        await new Promise((r) => setTimeout(r, 15));
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } finally {
+        inFlight -= 1;
+      }
+    };
+    void gemini;
+    const { app } = build(impl);
+    const session = await settle(app, (await startSim(app)).sessionId);
+    expect(session.status).toBe('ready');
+    expect(peak).toBeLessThanOrEqual(DELIBERATION_DEFAULTS.concurrency);
+    expect(peak).toBeGreaterThan(1);
+  });
+
+  it('retries a 429 once and recovers the chief', async () => {
+    let rateLimited = 0;
+    const gemini = scriptedFetch((system) => {
+      if (isInitial(system) && rateLimited === 0) {
+        rateLimited += 1;
+        return { status: 429 };
+      }
+      if (isReview(system)) return { text: JSON.stringify(RESPONSE) };
+      if (isInitial(system)) return { text: JSON.stringify(POSITION) };
+      return { text: JSON.stringify(BRIEF) };
+    });
+    const { app } = build(gemini.impl);
+    const session = await settle(app, (await startSim(app)).sessionId);
+
+    // the retry recovered it, so nothing was substituted and nothing degraded
+    expect(session.status).toBe('ready');
+    expect(session.initialPositions.filter((p) => p.substituted)).toHaveLength(0);
+    // 11 logical calls + 1 retry
+    expect(gemini.count()).toBe(DELIBERATION_CALL_COUNT + 1);
+  });
+
+  it('retries a timeout once', async () => {
+    let slow = 0;
+    const gemini = scriptedFetch((system) => {
+      if (isInitial(system) && slow === 0) {
+        slow += 1;
+        return { delayMs: 200, text: JSON.stringify(POSITION) };
+      }
+      if (isReview(system)) return { text: JSON.stringify(RESPONSE) };
+      if (isInitial(system)) return { text: JSON.stringify(POSITION) };
+      return { text: JSON.stringify(BRIEF) };
+    });
+    const world = fixedWorld();
+    const orchestrator = new DeliberationOrchestrator(
+      world,
+      new GeminiClient({ ...config, timeoutMs: 40 }, gemini.impl),
+      { ...DELIBERATION_DEFAULTS, retryBackoffMs: 1 }
+    );
+    const app = createApp({ adapters: createAdapters(null), world, deliberation: orchestrator });
+    const session = await settle(app, (await startSim(app)).sessionId);
+    expect(session.status).toBe('ready');
+    expect(gemini.count()).toBe(DELIBERATION_CALL_COUNT + 1);
+  });
+
+  it('does NOT retry a bad key, which would only burn quota', async () => {
+    const gemini = scriptedFetch((system) => {
+      if (isInitial(system)) return { status: 401 };
+      if (isReview(system)) return { text: JSON.stringify(RESPONSE) };
+      return { text: JSON.stringify(BRIEF) };
+    });
+    const { app } = build(gemini.impl);
+    const session = await settle(app, (await startSim(app)).sessionId);
+    expect(session.status).toBe('degraded');
+    expect(session.initialPositions.every((p) => p.substituted)).toBe(true);
+    // five failed initial calls, no retries, then five reviews and one synthesis
+    expect(gemini.count()).toBe(DELIBERATION_CALL_COUNT);
+  });
+
+  it('gives up after one retry rather than looping', async () => {
+    const gemini = scriptedFetch((system) => {
+      if (isInitial(system)) return { status: 429 };
+      if (isReview(system)) return { text: JSON.stringify(RESPONSE) };
+      return { text: JSON.stringify(BRIEF) };
+    });
+    const { app } = build(gemini.impl);
+    const session = await settle(app, (await startSim(app)).sessionId);
+    expect(session.status).toBe('degraded');
+    // 5 initial x 2 attempts, plus 5 reviews and 1 synthesis
+    expect(gemini.count()).toBe(5 * 2 + 6);
+  });
+
+  it('still makes exactly eleven calls when nothing fails', async () => {
+    const gemini = happyPath();
+    const { app } = build(gemini.impl);
+    await settle(app, (await startSim(app)).sessionId);
+    expect(gemini.count()).toBe(DELIBERATION_CALL_COUNT);
+  });
+});
+
+describe('mapWithConcurrency', () => {
+  it('preserves order and respects the limit', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const out = await mapWithConcurrency([1, 2, 3, 4, 5, 6, 7], 3, async (n) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight -= 1;
+      return n * 2;
+    });
+    expect(out).toEqual([2, 4, 6, 8, 10, 12, 14]);
+    expect(peak).toBeLessThanOrEqual(3);
+  });
+
+  it('handles an empty list', async () => {
+    expect(await mapWithConcurrency([], 3, async () => 1)).toEqual([]);
+  });
+});
+
+describe('daily quota exhaustion', () => {
+  /** The exact body the live free tier returns at 20 requests/day. */
+  const DAILY_QUOTA_BODY = JSON.stringify({
+    error: {
+      code: 429,
+      message:
+        'You exceeded your current quota. * Quota exceeded for metric: generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash Please retry in 38.1s.',
+      details: [
+        {
+          '@type': 'type.googleapis.com/google.rpc.QuotaFailure',
+          violations: [
+            { quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', quotaValue: '20' }
+          ]
+        },
+        { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '38s' }
+      ]
+    }
+  });
+
+  const quotaFetch = () => {
+    let calls = 0;
+    const impl: FetchLike = async () => {
+      calls += 1;
+      return new Response(DAILY_QUOTA_BODY, { status: 429 });
+    };
+    return { impl, count: () => calls };
+  };
+
+  it('does not retry a daily quota 429', async () => {
+    const gemini = quotaFetch();
+    const { app } = build(gemini.impl);
+    const session = await settle(app, (await startSim(app)).sessionId);
+    expect(session.status).toBe('degraded');
+    // The first wave is already in flight when the breaker trips, so at most
+    // `concurrency` calls are spent discovering it — never 11, and never 22.
+    expect(gemini.count()).toBeLessThanOrEqual(DELIBERATION_DEFAULTS.concurrency);
+    expect(gemini.count()).toBeLessThan(DELIBERATION_CALL_COUNT);
+  });
+
+  it('skips the whole session once the daily quota is gone', async () => {
+    const gemini = quotaFetch();
+    const { app } = build(gemini.impl);
+    const session = await settle(app, (await startSim(app)).sessionId);
+    // every artefact still present, all from the fixture
+    expect(session.initialPositions).toHaveLength(5);
+    expect(session.crossReview).toHaveLength(5);
+    expect(session.finalBrief).toBeDefined();
+    expect(session.initialPositions.every((p) => p.substituted)).toBe(true);
+    expect(session.source.degraded).toBe(true);
+    expect(gemini.count()).toBeLessThanOrEqual(DELIBERATION_DEFAULTS.concurrency);
+  });
+
+  it('still retries a burst limit that is not a daily cap', async () => {
+    let burst = 0;
+    const gemini = scriptedFetch((system) => {
+      if (isInitial(system) && burst === 0) {
+        burst += 1;
+        return { status: 503 };
+      }
+      if (isReview(system)) return { text: JSON.stringify(RESPONSE) };
+      if (isInitial(system)) return { text: JSON.stringify(POSITION) };
+      return { text: JSON.stringify(BRIEF) };
+    });
+    const { app } = build(gemini.impl);
+    const session = await settle(app, (await startSim(app)).sessionId);
+    expect(session.status).toBe('ready');
+    expect(gemini.count()).toBe(DELIBERATION_CALL_COUNT + 1);
   });
 });

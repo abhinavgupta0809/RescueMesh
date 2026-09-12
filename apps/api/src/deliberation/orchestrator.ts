@@ -16,25 +16,71 @@ import {
   type ScenarioStepName
 } from '@rescuemesh/shared';
 import { extractJsonObject } from '../adapters/prompts.js';
-import { GeminiClient, GeminiError } from '../adapters/gemini.js';
+import {
+  GeminiClient,
+  GeminiError,
+  isQuotaExhausted,
+  isRetryableGeminiFailure
+} from '../adapters/gemini.js';
 import { AGENT_ROLES } from '../recommendations.js';
 import type { World } from '../world.js';
 import { FIXTURE_MODEL, fixtureBrief, fixturePosition, fixtureResponse } from './fixture.js';
 import { crossReviewPrompt, initialPrompt, synthesisPrompt } from './prompts.js';
 
 export interface DeliberationLimits {
-  /** Hard ceiling on model calls for one session. */
+  /** Hard ceiling on model calls for one session, retries included. */
   maxCalls: number;
   /** Ceiling on reported tokens for one session. */
   maxTokens: number;
   /** Per-call budget; the provider client also has its own. */
   perCallTimeoutMs: number;
+  /**
+   * How many calls in a round may be in flight at once. Five concurrent calls
+   * per round reliably trips provider rate limits, so a round is run in small
+   * waves instead. Costs a little wall-clock, avoids losing chiefs to 429s.
+   */
+  concurrency: number;
+  /**
+   * Extra attempts after the first, per call. One bounded retry — never a loop.
+   * Only transient failures (429/503/500/timeout) are retried; a bad key is not.
+   */
+  maxRetries: number;
+  /** Backoff before the single retry. */
+  retryBackoffMs: number;
 }
 
 export const DELIBERATION_DEFAULTS: DeliberationLimits = {
-  maxCalls: DELIBERATION_CALL_COUNT,
+  // 11 calls plus headroom for one retry each.
+  maxCalls: DELIBERATION_CALL_COUNT * 2,
   maxTokens: 120_000,
-  perCallTimeoutMs: 30_000
+  perCallTimeoutMs: 45_000,
+  concurrency: 3,
+  maxRetries: 1,
+  retryBackoffMs: 1_200
+};
+
+/**
+ * Runs `task` over `items` at most `limit` at a time, preserving input order.
+ * Deliberately not Promise.all: a burst of five is what trips the rate limit.
+ */
+export const mapWithConcurrency = async <T, R>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T, index: number) => Promise<R>
+): Promise<R[]> => {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      const item = items[index];
+      if (item === undefined) return;
+      results[index] = await task(item, index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 };
 
 const now = () => new Date().toISOString();
@@ -62,6 +108,13 @@ export class DeliberationOrchestrator {
    */
   private readonly planRevisions = new Map<string, number>();
   private sequence = 0;
+  /**
+   * Set when the provider reports its daily quota is gone. Every remaining call
+   * in the session is then skipped and filled from the fixture: continuing would
+   * spend requests that cannot succeed, and on a 20/day free tier those requests
+   * are the scarcest thing in the system.
+   */
+  private readonly quotaOut = new Set<string>();
 
   constructor(
     private readonly world: World,
@@ -92,6 +145,7 @@ export class DeliberationOrchestrator {
     this.sessions.clear();
     this.byRequest.clear();
     this.planRevisions.clear();
+    this.quotaOut.clear();
   }
 
   /** Records the deterministic plan this session produced. */
@@ -190,8 +244,45 @@ export class DeliberationOrchestrator {
     return (current.usage.totalTokens ?? 0) < this.limits.maxTokens;
   }
 
-  /** One attempt, no retry. Returns the parsed object or throws. */
+  /**
+   * One attempt plus at most `maxRetries` more, and only for transient
+   * failures. Never an unbounded loop, and every attempt counts against budget.
+   */
   private async call(
+    sessionId: string,
+    stage: DeliberationStage,
+    prompt: { system: string; user: string }
+  ): Promise<Record<string, unknown>> {
+    if (this.quotaOut.has(sessionId)) {
+      throw new GeminiError(
+        'http',
+        'Provider daily quota exhausted; remaining calls skipped',
+        undefined,
+        429
+      );
+    }
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= this.limits.maxRetries; attempt += 1) {
+      if (attempt > 0) {
+        if (!isRetryableGeminiFailure(lastError)) break;
+        await new Promise((resolve) => setTimeout(resolve, this.limits.retryBackoffMs));
+      }
+      try {
+        return await this.attemptCall(sessionId, stage, prompt);
+      } catch (error: unknown) {
+        lastError = error;
+        if (isQuotaExhausted(error)) {
+          // Stop the whole session's remaining calls, not just this one.
+          this.quotaOut.add(sessionId);
+          break;
+        }
+        if (!isRetryableGeminiFailure(error)) break;
+      }
+    }
+    throw lastError;
+  }
+
+  private async attemptCall(
     sessionId: string,
     stage: DeliberationStage,
     prompt: { system: string; user: string }
@@ -228,8 +319,10 @@ export class DeliberationOrchestrator {
 
     // ── Round 1: five independent positions, concurrently ────────────────────
     this.patch(sessionId, { status: 'initial_analysis' });
-    const positions = await Promise.all(
-      AGENT_ROLES.map(async (role): Promise<ChiefPosition> => {
+    const positions = await mapWithConcurrency(
+      AGENT_ROLES,
+      this.limits.concurrency,
+      async (role): Promise<ChiefPosition> => {
         if (!this.client) return { ...fixturePosition(role), substituted: true };
         try {
           const raw = await this.call(sessionId, 'initial_analysis', initialPrompt(role, snapshot));
@@ -243,7 +336,7 @@ export class DeliberationOrchestrator {
           this.note(sessionId, describe(error, 'initial_analysis', role));
           return { ...fixturePosition(role), substituted: true };
         }
-      })
+      }
     );
     this.patch(sessionId, { initialPositions: positions });
 
@@ -251,8 +344,10 @@ export class DeliberationOrchestrator {
 
     // ── Round 2: cross-review, using the VALIDATED positions ─────────────────
     this.patch(sessionId, { status: 'cross_review' });
-    const responses = await Promise.all(
-      AGENT_ROLES.map(async (role): Promise<ChiefResponse> => {
+    const responses = await mapWithConcurrency(
+      AGENT_ROLES,
+      this.limits.concurrency,
+      async (role): Promise<ChiefResponse> => {
         if (!this.client) return { ...fixtureResponse(role), substituted: true };
         try {
           const raw = await this.call(
@@ -270,7 +365,7 @@ export class DeliberationOrchestrator {
           this.note(sessionId, describe(error, 'cross_review', role));
           return { ...fixtureResponse(role), substituted: true };
         }
-      })
+      }
     );
     this.patch(sessionId, { crossReview: responses });
 

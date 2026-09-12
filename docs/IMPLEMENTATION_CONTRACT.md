@@ -136,6 +136,27 @@ before it is approved, the revision is rechecked. If world state moved during
 deliberation the session becomes `stale`: its brief may be read, but it cannot
 produce or execute a plan. Reset clears any active session.
 
+### Provider quota
+
+Measured against the live free tier: `gemini-3.6-flash` allows **20
+`generateContent` requests per day** per project
+(`GenerateRequestsPerDayPerProjectPerModel-FreeTier`). One deliberation is 11
+calls, so **the free tier supports one deliberation per day** with a little
+headroom, and nothing else.
+
+Consequences, all implemented:
+
+- **A daily-quota 429 is never retried.** Retrying cannot succeed and doubles
+  consumption of what remains. Only short burst limits (503/500, or a 429 with
+  a small `retryDelay`) get the single retry.
+- **The first daily-quota 429 short-circuits the rest of the session.** Every
+  remaining call is skipped and filled from the fixture, so an exhausted quota
+  costs at most `concurrency` wasted requests rather than 11 or 22.
+- Rounds run `concurrency` calls at a time (default 3) rather than five at once.
+
+For a live demo, plan on a paid tier or a pre-recorded run. The scripted
+fallback exists precisely so the demo survives an exhausted quota.
+
 ### Failure and fallback
 
 Deterministic simulation continues whether or not Gemini is reachable. A

@@ -16,16 +16,47 @@ export class GeminiError extends Error {
   constructor(
     readonly stage: GeminiFailureStage,
     message: string,
-    readonly detail?: string
+    readonly detail?: string,
+    /** HTTP status, when the failure came from a response. */
+    readonly status?: number
   ) {
     super(message);
     this.name = 'GeminiError';
   }
 }
 
+/**
+ * True when the 429 is a *daily* quota exhaustion rather than a short burst
+ * limit. Measured against the live API: the free tier reports
+ * `GenerateRequestsPerDayPerProjectPerModel-FreeTier` with a limit of 20/day.
+ * Retrying that cannot succeed and doubles consumption of what little is left.
+ */
+export const isQuotaExhausted = (error: unknown): boolean => {
+  if (!(error instanceof GeminiError) || error.status !== 429) return false;
+  const detail = error.detail ?? '';
+  if (/PerDay|per day|GenerateRequestsPerDay/i.test(detail)) return true;
+  // A long retryDelay means the window is not coming back inside a demo.
+  const delay = /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"|retry in (\d+(?:\.\d+)?)s/i.exec(detail);
+  const seconds = Number(delay?.[1] ?? delay?.[2] ?? 0);
+  return seconds > 10;
+};
+
+/**
+ * Transient failures worth one retry: a brief burst limit, or the provider
+ * momentarily refusing load. A 401/403/404 is a configuration problem, and a
+ * daily quota exhaustion cannot be retried away — retrying either only wastes
+ * requests that the demo still needs.
+ */
+export const isRetryableGeminiFailure = (error: unknown): boolean => {
+  if (!(error instanceof GeminiError)) return false;
+  if (isQuotaExhausted(error)) return false;
+  if (error.stage === 'timeout') return true;
+  return error.status === 429 || error.status === 503 || error.status === 500;
+};
+
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
-const truncate = (value: string, max = 300): string =>
+const truncate = (value: string, max = 700): string =>
   value.length <= max ? value : `${value.slice(0, max)}…`;
 
 /**
@@ -86,7 +117,8 @@ export class GeminiClient {
       throw new GeminiError(
         'http',
         `Gemini API returned ${response.status} ${response.statusText}`.trim(),
-        truncate(redact(body))
+        truncate(redact(body)),
+        response.status
       );
     }
 
