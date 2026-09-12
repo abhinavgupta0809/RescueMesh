@@ -127,7 +127,7 @@ export const GEMINI_DEFAULTS = {
   baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
   model: 'gemini-3.6-flash',
   timeoutMs: 45_000,
-  maxOutputTokens: 4_096,
+  maxOutputTokens: 8_192,
   temperature: 0.2
 } as const;
 

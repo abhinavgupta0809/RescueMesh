@@ -25,7 +25,13 @@ import {
 import { AGENT_ROLES } from '../recommendations.js';
 import type { World } from '../world.js';
 import { FIXTURE_MODEL, fixtureBrief, fixturePosition, fixtureResponse } from './fixture.js';
-import { crossReviewPrompt, initialPrompt, synthesisPrompt } from './prompts.js';
+import { crossReviewPrompt, initialPrompt, repairPrompt, synthesisPrompt } from './prompts.js';
+import { CHIEF_POSITION_SCHEMA, CHIEF_RESPONSE_SCHEMA, FINAL_BRIEF_SCHEMA } from './schemas.js';
+import {
+  diagnoseReply,
+  diagnoseTransport,
+  type ReplyDiagnosis
+} from '../adapters/gemini-failure.js';
 
 export interface DeliberationLimits {
   /** Hard ceiling on model calls for one session, retries included. */
@@ -46,6 +52,12 @@ export interface DeliberationLimits {
    */
   maxRetries: number;
   /**
+   * Bounded format-repair attempts per contribution, after a reply arrives
+   * but cannot be validated. One, never a loop: a normal run stays at 11
+   * calls and a run needing one repair is 12.
+   */
+  maxRepairs: number;
+  /**
    * Backoff before the single retry, applied ONLY to rate-limit-shaped
    * failures (429/503/500). A timeout has already spent its wait, so retrying
    * it immediately is both faster and no less polite to the provider.
@@ -60,6 +72,7 @@ export const DELIBERATION_DEFAULTS: DeliberationLimits = {
   perCallTimeoutMs: 45_000,
   concurrency: 3,
   maxRetries: 1,
+  maxRepairs: 1,
   retryBackoffMs: 1_200
 };
 
@@ -124,6 +137,8 @@ export class DeliberationOrchestrator {
    * are the scarcest thing in the system.
    */
   private readonly quotaOut = new Set<string>();
+  /** Most recent raw reply, so a failure can be classified structurally. */
+  private lastRawReply = '';
 
   constructor(
     private readonly world: World,
@@ -260,7 +275,8 @@ export class DeliberationOrchestrator {
   private async call(
     sessionId: string,
     stage: DeliberationStage,
-    prompt: { system: string; user: string }
+    prompt: { system: string; user: string },
+    responseSchema?: object
   ): Promise<Record<string, unknown>> {
     if (this.quotaOut.has(sessionId)) {
       throw new GeminiError(
@@ -280,7 +296,7 @@ export class DeliberationOrchestrator {
         }
       }
       try {
-        return await this.attemptCall(sessionId, stage, prompt);
+        return await this.attemptCall(sessionId, stage, prompt, responseSchema);
       } catch (error: unknown) {
         lastError = error;
         if (isQuotaExhausted(error)) {
@@ -297,7 +313,8 @@ export class DeliberationOrchestrator {
   private async attemptCall(
     sessionId: string,
     stage: DeliberationStage,
-    prompt: { system: string; user: string }
+    prompt: { system: string; user: string },
+    responseSchema?: object
   ): Promise<Record<string, unknown>> {
     if (!this.client) throw new GeminiError('transport', 'No Gemini client configured');
     if (!this.budgetLeft(sessionId)) {
@@ -305,7 +322,8 @@ export class DeliberationOrchestrator {
     }
     const startedAt = Date.now();
     try {
-      const text = await this.client.generateJson(prompt.system, prompt.user);
+      const text = await this.client.generateJson(prompt.system, prompt.user, responseSchema);
+      this.lastRawReply = text;
       return extractJsonObject(text, GeminiError);
     } finally {
       const current = this.sessions.get(sessionId);
@@ -326,6 +344,52 @@ export class DeliberationOrchestrator {
     }
   }
 
+  /**
+   * Classifies why a contribution failed. Truncation is detected from the reply
+   * itself, because finishReason has been observed NOT to report it.
+   */
+  private diagnose(error: unknown): ReplyDiagnosis {
+    if (error instanceof GeminiError) {
+      if (error.stage === 'shape') {
+        return diagnoseReply(this.lastRawReply, {
+          ...(this.client?.lastFinishReason ? { finishReason: this.client.lastFinishReason } : {})
+        });
+      }
+      return diagnoseTransport(error.stage, error.status, isQuotaExhausted(error));
+    }
+    return { fault: 'transport', summary: 'Unexpected failure.', repairable: false };
+  }
+
+  /**
+   * One bounded format-repair attempt. Only for a reply that arrived and could
+   * not be validated — never for auth, quota, timeout or a blocked prompt,
+   * where a second call cannot help and only spends quota.
+   */
+  private async repair<T>(
+    sessionId: string,
+    stage: DeliberationStage,
+    role: AgentRole,
+    snapshot: Scenario,
+    kind: 'initial' | 'review' | 'synthesis',
+    schema: object,
+    diagnosis: ReplyDiagnosis,
+    validate: (raw: Record<string, unknown>) => { ok: boolean; value?: T; reason?: string }
+  ): Promise<T | undefined> {
+    if (!diagnosis.repairable || this.limits.maxRepairs < 1) return undefined;
+    try {
+      const raw = await this.call(
+        sessionId,
+        stage,
+        repairPrompt(role, snapshot, kind, diagnosis.summary),
+        schema
+      );
+      const validated = validate(raw);
+      return validated.ok ? validated.value : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async run(sessionId: string, snapshot: Scenario): Promise<void> {
     let degraded = !this.client;
 
@@ -337,15 +401,32 @@ export class DeliberationOrchestrator {
       async (role): Promise<ChiefPosition> => {
         if (!this.client) return { ...fixturePosition(role), substituted: true };
         try {
-          const raw = await this.call(sessionId, 'initial_analysis', initialPrompt(role, snapshot));
+          const raw = await this.call(
+            sessionId,
+            'initial_analysis',
+            initialPrompt(role, snapshot),
+            CHIEF_POSITION_SCHEMA
+          );
           const validated = validateChiefPosition(role, raw);
           if (!validated.ok || !validated.value) {
             throw new GeminiError('shape', validated.reason ?? 'position failed validation');
           }
           return validated.value;
         } catch (error: unknown) {
+          const diagnosis = this.diagnose(error);
+          this.note(sessionId, describe(error, 'initial_analysis', role, diagnosis));
+          const repaired = await this.repair(
+            sessionId,
+            'initial_analysis',
+            role,
+            snapshot,
+            'initial',
+            CHIEF_POSITION_SCHEMA,
+            diagnosis,
+            (raw) => validateChiefPosition(role, raw)
+          );
+          if (repaired) return repaired;
           degraded = true;
-          this.note(sessionId, describe(error, 'initial_analysis', role));
           return { ...fixturePosition(role), substituted: true };
         }
       }
@@ -365,7 +446,8 @@ export class DeliberationOrchestrator {
           const raw = await this.call(
             sessionId,
             'cross_review',
-            crossReviewPrompt(role, snapshot, positions)
+            crossReviewPrompt(role, snapshot, positions),
+            CHIEF_RESPONSE_SCHEMA
           );
           const validated = validateChiefResponse(role, raw);
           if (!validated.ok || !validated.value) {
@@ -373,8 +455,20 @@ export class DeliberationOrchestrator {
           }
           return validated.value;
         } catch (error: unknown) {
+          const diagnosis = this.diagnose(error);
+          this.note(sessionId, describe(error, 'cross_review', role, diagnosis));
+          const repaired = await this.repair(
+            sessionId,
+            'cross_review',
+            role,
+            snapshot,
+            'review',
+            CHIEF_RESPONSE_SCHEMA,
+            diagnosis,
+            (raw) => validateChiefResponse(role, raw)
+          );
+          if (repaired) return repaired;
           degraded = true;
-          this.note(sessionId, describe(error, 'cross_review', role));
           return { ...fixtureResponse(role), substituted: true };
         }
       }
@@ -403,7 +497,8 @@ export class DeliberationOrchestrator {
               objections: r.objections
             })),
             snapshot.incidents.map((incident) => incident.id)
-          )
+          ),
+          FINAL_BRIEF_SCHEMA
         );
         const validated = validateFinalBrief(raw);
         if (!validated.ok || !validated.value) {
@@ -411,9 +506,24 @@ export class DeliberationOrchestrator {
         }
         brief = validated.value;
       } catch (error: unknown) {
-        degraded = true;
-        this.note(sessionId, describe(error, 'synthesis'));
-        brief = fixtureBrief();
+        const diagnosis = this.diagnose(error);
+        this.note(sessionId, describe(error, 'synthesis', undefined, diagnosis));
+        const repaired = await this.repair(
+          sessionId,
+          'synthesis',
+          'incident_commander',
+          snapshot,
+          'synthesis',
+          FINAL_BRIEF_SCHEMA,
+          diagnosis,
+          (raw) => validateFinalBrief(raw)
+        );
+        if (repaired) {
+          brief = repaired;
+        } else {
+          degraded = true;
+          brief = fixtureBrief();
+        }
       }
     }
     this.patch(sessionId, { finalBrief: brief, status: 'validating' });
@@ -466,9 +576,16 @@ export class DeliberationOrchestrator {
 const describe = (
   error: unknown,
   stage: DeliberationStage,
-  role?: AgentRole
+  role?: AgentRole,
+  diagnosis?: ReplyDiagnosis
 ): DeliberationError => {
-  const base = { stage, at: now(), ...(role ? { role } : {}) };
+  const base = {
+    stage,
+    at: now(),
+    ...(role ? { role } : {}),
+    ...(diagnosis ? { fault: diagnosis.fault, summary: diagnosis.summary } : {}),
+    ...(diagnosis?.finishReason ? { finishReason: diagnosis.finishReason } : {})
+  };
   if (error instanceof GeminiError) {
     const code =
       error.stage === 'timeout'

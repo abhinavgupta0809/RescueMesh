@@ -70,11 +70,23 @@ export class GeminiClient {
     private readonly fetchImpl: FetchLike = fetch
   ) {}
 
+  /** finishReason from the most recent reply, for failure classification. */
+  lastFinishReason: string | undefined;
+
   get model(): string {
     return this.config.model;
   }
 
-  async generateJson(systemInstruction: string, prompt: string): Promise<string> {
+  async generateJson(
+    systemInstruction: string,
+    prompt: string,
+    /**
+     * Optional response schema. Constrains the model to the exact shape the
+     * validators accept, rather than merely asking for JSON — which is how a
+     * reply ran past the output cap and arrived truncated.
+     */
+    responseSchema?: object
+  ): Promise<string> {
     const url = `${this.config.baseUrl}/models/${this.config.model}:generateContent`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
@@ -94,7 +106,8 @@ export class GeminiClient {
           generationConfig: {
             temperature: this.config.temperature,
             maxOutputTokens: this.config.maxOutputTokens,
-            responseMimeType: 'application/json'
+            responseMimeType: 'application/json',
+            ...(responseSchema ? { responseSchema } : {})
           }
         }),
         signal: controller.signal
@@ -131,7 +144,8 @@ export class GeminiClient {
     if (!text) throw new GeminiError('shape', 'Gemini response contained no candidate text');
     // A reply cut off at the cap looks like malformed JSON downstream; say what
     // actually happened so the fix is obvious.
-    if (readFinishReason(payload) === 'MAX_TOKENS') {
+    this.lastFinishReason = readFinishReason(payload);
+    if (this.lastFinishReason === 'MAX_TOKENS') {
       throw new GeminiError(
         'shape',
         `Gemini reply hit the ${this.config.maxOutputTokens}-token output cap before finishing its JSON`,
