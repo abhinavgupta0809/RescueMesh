@@ -4,6 +4,7 @@ export const pittsburghFloodScenario: Scenario = {
   id: 'pgh-flash-flood-001',
   name: 'Monongahela Flash Flood — 18:40',
   city: 'Pittsburgh',
+  revision: 0,
   simulatedTime: '2026-07-18T18:40:00-04:00',
   status: 'active',
   facilities: [
@@ -267,6 +268,74 @@ export const pittsburghFloodScenario: Scenario = {
       synthetic: true
     }
   ],
+  zones: [
+    {
+      id: 'zone-downtown',
+      name: 'Downtown / Uptown / Strip',
+      connectivity: 'online',
+      facilityIds: ['h-mercy', 'p-zone1', 'f-03'],
+      incidentIds: [],
+      connectivityChangedAt: '2026-07-18T18:00:00-04:00'
+    },
+    {
+      id: 'zone-north-shore',
+      name: 'North Shore',
+      connectivity: 'online',
+      facilityIds: ['h-agh', 'r-river'],
+      incidentIds: [],
+      connectivityChangedAt: '2026-07-18T18:00:00-04:00'
+    },
+    {
+      id: 'zone-oakland',
+      name: 'Oakland / Bates Street',
+      connectivity: 'online',
+      facilityIds: ['h-presby'],
+      incidentIds: ['inc-parkway'],
+      connectivityChangedAt: '2026-07-18T18:00:00-04:00'
+    },
+    {
+      id: 'zone-south-side',
+      name: 'South Side',
+      connectivity: 'degraded',
+      facilityIds: ['f-07'],
+      incidentIds: ['inc-southside'],
+      connectivityChangedAt: '2026-07-18T18:35:00-04:00'
+    },
+    {
+      id: 'zone-east',
+      name: 'East / Swissvale',
+      connectivity: 'online',
+      facilityIds: ['f-19', 'p-zone4', 'r-east'],
+      incidentIds: ['inc-trail'],
+      connectivityChangedAt: '2026-07-18T18:00:00-04:00'
+    }
+  ],
+  bridges: [
+    {
+      id: 'bridge-birmingham',
+      name: 'Birmingham Bridge',
+      status: 'open',
+      routeIds: ['route-mercy-south'],
+      connectsZoneIds: ['zone-downtown', 'zone-south-side'],
+      synthetic: true
+    },
+    {
+      id: 'bridge-hot-metal',
+      name: 'Hot Metal Bridge',
+      status: 'open',
+      routeIds: ['route-east-parkway'],
+      connectsZoneIds: ['zone-east', 'zone-oakland'],
+      synthetic: true
+    },
+    {
+      id: 'bridge-fort-duquesne',
+      name: 'Fort Duquesne Bridge',
+      status: 'open',
+      routeIds: ['route-river-parkway'],
+      connectsZoneIds: ['zone-north-shore', 'zone-oakland'],
+      synthetic: true
+    }
+  ],
   assignments: [
     {
       id: 'as-001',
@@ -288,6 +357,8 @@ export const pittsburghFloodScenario: Scenario = {
       rationale: 'Local engine supports evacuation while the nearest ALS unit stages uphill.'
     }
   ],
+  plans: [],
+  reports: [],
   recommendations: [
     {
       id: 'rec-ic-1',
@@ -345,28 +416,32 @@ export const pittsburghFloodScenario: Scenario = {
       occurredAt: '2026-07-18T18:31:00-04:00',
       type: 'incident_reported',
       message: 'Vehicle entrapment reported at Bates Street underpass.',
-      entityIds: ['inc-parkway']
+      entityIds: ['inc-parkway'],
+      revision: 0
     },
     {
       id: 'evt-2',
       occurredAt: '2026-07-18T18:33:00-04:00',
       type: 'road_changed',
       message: 'West trail access marked closed by simulator.',
-      entityIds: ['route-west-trail']
+      entityIds: ['route-west-trail'],
+      revision: 0
     },
     {
       id: 'evt-3',
       occurredAt: '2026-07-18T18:36:00-04:00',
       type: 'resource_dispatched',
       message: 'RIVER-2 and ZONE1-14 dispatched.',
-      entityIds: ['boat-2', 'pol-14', 'inc-parkway']
+      entityIds: ['boat-2', 'pol-14', 'inc-parkway'],
+      revision: 0
     },
     {
       id: 'evt-4',
       occurredAt: '2026-07-18T18:38:00-04:00',
       type: 'facility_updated',
       message: 'Mercy modeled load increased to 17 of 24.',
-      entityIds: ['h-mercy']
+      entityIds: ['h-mercy'],
+      revision: 0
     }
   ]
 };

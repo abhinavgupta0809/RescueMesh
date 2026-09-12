@@ -9,6 +9,8 @@
   ],
   "scripts": {
     "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w @rescuemesh/api\" \"npm run dev -w @rescuemesh/web\"",
+    "ifm:check": "npm run ifm:check -w @rescuemesh/api",
+    "k2": "npm run k2 -w @rescuemesh/api --silent --",
     "build": "npm run build -w @rescuemesh/shared && npm run build -w @rescuemesh/api && npm run build -w @rescuemesh/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "eslint .",

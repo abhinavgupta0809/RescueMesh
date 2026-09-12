@@ -19,27 +19,29 @@ A judge can submit or select a field report, see it become a structured incident
 
 ## Milestone 1 — Interactive simulation loop
 
-Build the complete demo workflow using only local state first.
+The contract for this milestone is [docs/IMPLEMENTATION_CONTRACT.md](IMPLEMENTATION_CONTRACT.md): eight typed commands, three separate state machines, and twelve invariants enforced by `checkInvariants()`.
 
-1. Add a field-report form with two preset reports and free text.
-2. Convert a parsed report into a reviewable incident draft.
-3. Add API commands to approve an incident, accept/dismiss a recommendation, and approve an assignment.
-4. Append every approved change to the world-state event feed.
-5. Add a reset action that restores the known seed scenario.
+- [x] Typed commands, state transitions, response/error shapes, and invariants defined in the shared package
+- [x] Field-report form with two preset reports and free text
+- [x] A parsed report rendered as a reviewable incident draft with visible provenance
+- [ ] `POST /api/commands` handlers for all eight commands (K2)
+- [ ] `GET /api/world-state?since=<revision>` polling shape (K2)
+- [ ] Browser-local offline queue and reconnect-and-sync flow (Codex)
+- [ ] Reset action wired to `scenario.reset` (K2 + Codex)
 
-**Exit check:** the presenter can run the full demo flow twice with identical results and reset it in one click.
+**Exit check:** the presenter can run the full eight-step flow twice with identical results and reset it in one click, with `checkInvariants()` clean after every command.
 
-## Milestone 2 — Gemini reasoning
+## Milestone 2 — IFM K2 reasoning (complete)
 
-Replace only `ReasoningAdapter` while retaining the mock implementation.
+Replaced only `ReasoningAdapter` while retaining the mock implementation.
 
-1. Define strict JSON output contracts for report parsing and each AI role.
-2. Add Gemini parsing with timeouts, validation, and fallback to the deterministic mock.
-3. Give each chief a narrow prompt and only the world-state fields relevant to that role.
-4. Keep recommendations advisory and require explicit human approval.
-5. Show source (`Gemini` or `mock`) and confidence in the interface.
+- [x] Strict JSON output contracts for report parsing and each AI role
+- [x] IFM K2 parsing with timeouts, validation, and fallback to the deterministic mock
+- [x] A narrow prompt per chief, each seeing only the world-state fields for that role (`roleContext`)
+- [x] Recommendations stay advisory and `pending` until a human accepts them
+- [x] Source (`ifm` or `mock`) and confidence shown per card in the interface
 
-**Exit check:** malformed model output cannot mutate world state; missing credentials and provider errors fall back visibly and safely.
+**Exit check:** malformed model output cannot mutate world state; missing credentials and provider errors fall back visibly and safely. Covered by `apps/api/src/adapters/ifm.test.ts`, `reasoning.test.ts`, and the live-mode cases in `app.test.ts`.
 
 ## Milestone 3 — OR-Tools allocation
 
@@ -73,7 +75,7 @@ Implement an allocation adapter as a small Python service or child process only 
 
 ## Optional edge track
 
-K2/IFM is a stretch goal after the hosted flow is reliable. Limit it to offline classification or summarization of field reports behind `EdgeIntelligenceAdapter`; do not attempt peer-to-peer networking or distributed consensus during the hackathon.
+An on-device IFM model is a stretch goal after the hosted flow is reliable. Limit it to offline classification or summarization of field reports behind `EdgeIntelligenceAdapter`; do not attempt peer-to-peer networking or distributed consensus during the hackathon.
 
 ## Suggested ownership
 
@@ -81,7 +83,7 @@ K2/IFM is a stretch goal after the hosted flow is reliable. Limit it to offline 
 | ------------------------------------ | ------------------------ | ---------------------------- |
 | Command-center interactions          | `apps/web`               | Milestone 0                  |
 | World-state commands and event log   | `apps/api`               | Milestone 0                  |
-| Gemini adapter and output validation | `apps/api/src/adapters`  | Incident review flow         |
+| IFM K2 adapter and output validation | `apps/api/src/adapters`  | Incident review flow         |
 | OR-Tools optimizer                   | isolated adapter/service | Assignment approval flow     |
 | Map and route integration            | web + geography adapter  | Stable incident/resource IDs |
 | Deployment and demo script           | repository operations    | Milestones 1–3               |

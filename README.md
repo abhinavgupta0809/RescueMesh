@@ -17,7 +17,7 @@ The first milestone intentionally does only four things:
 
 It does **not** implement production authentication, live dispatch, real GIS layers, distributed coordination, or emergency-management claims.
 
-The ordered implementation roadmap and milestone exit criteria are in [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
+The ordered implementation roadmap and milestone exit criteria are in [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md). The typed command contract, state machines, response/error shapes, and invariants for the interactive demo are in [docs/IMPLEMENTATION_CONTRACT.md](docs/IMPLEMENTATION_CONTRACT.md) — that document is the source of truth for anything touching `packages/shared`.
 
 ## Architecture
 
@@ -31,16 +31,16 @@ packages/shared      TypeScript domain schemas + Pittsburgh seed scenario
 
 The API owns the adapter boundary. Its current adapters return deterministic fixture data, so the demo is repeatable and offline-friendly:
 
-| Capability                               | Intended integration        | Milestone behavior                                     |
-| ---------------------------------------- | --------------------------- | ------------------------------------------------------ |
-| Incident parsing and five-role reasoning | Gemini                      | Deterministic parsed report and seeded recommendations |
-| Resource allocation                      | OR-Tools                    | Seeded, explainable assignments                        |
-| Shared world state                       | MongoDB Atlas               | In-memory cloned scenario fixture                      |
-| Geography and travel time                | Google Maps, Places, Routes | Synthetic coordinates and modeled routes               |
-| Spoken field reports and alerts          | ElevenLabs                  | Transcript-only mock response                          |
-| User roles                               | Auth0                       | Fixed commander role                                   |
-| Backend hosting                          | Vultr                       | Local Node process                                     |
-| Offline edge intelligence                | K2/IFM                      | Offline-ready status flag                              |
+| Capability                               | Intended integration        | Milestone behavior                             |
+| ---------------------------------------- | --------------------------- | ---------------------------------------------- |
+| Incident parsing and five-role reasoning | IFM Labs K2 (hosted)        | Live when `IFM_API_KEY` is set; mock otherwise |
+| Resource allocation                      | OR-Tools                    | Seeded, explainable assignments                |
+| Shared world state                       | MongoDB Atlas               | In-memory cloned scenario fixture              |
+| Geography and travel time                | Google Maps, Places, Routes | Synthetic coordinates and modeled routes       |
+| Spoken field reports and alerts          | ElevenLabs                  | Transcript-only mock response                  |
+| User roles                               | Auth0                       | Fixed commander role                           |
+| Backend hosting                          | Vultr                       | Local Node process                             |
+| Offline edge intelligence                | IFM (on-device)             | Offline-ready status flag                      |
 
 The adapters are simple interfaces in `apps/api/src/adapters/contracts.ts`. Replacing a mock should not require changing route handlers or the shared schema.
 
@@ -54,14 +54,52 @@ cp .env.example .env
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173). The API listens at [http://localhost:4000](http://localhost:4000). No environment values are needed for mock mode; `.env.example` contains placeholders only and `.env` is ignored by Git.
+Open [http://localhost:5173](http://localhost:5173). The API listens at [http://localhost:4000](http://localhost:4000). No environment values are needed for mock mode; `.env` is ignored by Git.
 
 Useful endpoints:
 
-- `GET /health` — service status and active mock mode
+- `GET /health` — service status, and which reasoning provider and model are active
 - `GET /api/scenario` — complete typed demo scenario
 - `GET /api/world-state` — assignments, routes, events, and simulated clock
-- `POST /api/reports/parse` with `{ "report": "Two people trapped" }` — deterministic incident parsing example
+- `POST /api/reports/parse` with `{ "report": "Two people trapped" }` — one field report into a reviewable incident draft, plus its provenance
+- `GET /api/recommendations` — one recommendation per chief, each with its provenance
+- `GET /api/recommendations/:role` — a single chief, e.g. `rescue_chief`
+
+## Enabling IFM K2 reasoning
+
+Report parsing and the five chief recommendations run on an IFM Labs hosted model. Pasting a key is the only setup step:
+
+```bash
+cp .env.example .env        # if you have not already
+# edit .env and set: IFM_API_KEY=IFM-xf...
+npm run ifm:check           # one real call, prints the model's reply
+npm run dev
+```
+
+`npm run ifm:check` verifies the key, the base URL, and that the model's JSON output validates against the domain schema. It exits non-zero on failure and tells you what broke.
+
+Defaults come from the IFM quickstart and can be overridden in `.env`:
+
+| Variable          | Default                    | Purpose                                     |
+| ----------------- | -------------------------- | ------------------------------------------- |
+| `IFM_API_KEY`     | _(empty)_                  | Your key. Empty means mock-only mode.       |
+| `IFM_BASE_URL`    | `https://api.ifm.ai/v1`    | Chat-completions base URL.                  |
+| `IFM_MODEL`       | `IFM/K2-Horizon-375B-A23B` | Hosted model id.                            |
+| `IFM_TIMEOUT_MS`  | `20000`                    | Per-request budget before falling back.     |
+| `IFM_MAX_TOKENS`  | `800`                      | Reply cap.                                  |
+| `IFM_TEMPERATURE` | `0.2`                      | Low, because the output must parse as JSON. |
+
+The API reads `.env` itself — no dotenv dependency and no shell exports needed. Real environment variables take precedence over the file.
+
+### How the fallback works
+
+`ResilientReasoningAdapter` wraps the IFM adapter and the deterministic mock. It falls back to the mock on a missing key, a network error, a timeout, any non-2xx response, or output that fails validation. Every response carries a `source`:
+
+```json
+{ "provider": "ifm", "model": "IFM/K2-Horizon-375B-A23B", "degraded": false }
+```
+
+`degraded: true` means IFM was configured and tried, and the mock answered instead; `warning` then carries the reason. The interface shows the same label on each card, so a judge can always see which answers came from the model. Model output can never mutate world state directly: severities must match the domain enum, incident IDs are checked against the scenario, confidence is clamped, and unknown IDs are dropped.
 
 ## Two-minute demo flow
 
@@ -102,8 +140,9 @@ This checks formatting, lint rules, TypeScript across all workspaces, seed/API t
 - **Shared compile-time types:** enough safety for the first demo without introducing a schema framework.
 - **Read-only scenario API:** the event model shows the intended evolution without prematurely building mutation/conflict logic.
 - **Deterministic mocks first:** integration credentials can be added one adapter at a time while keeping local development and judging reliable.
+- **No provider SDK:** the IFM endpoint is OpenAI-shaped, so one `fetch` call with a bearer token keeps the dependency tree and the failure surface small.
 - **No real map SDK yet:** the stylized operating picture communicates hierarchy while avoiding keys, quotas, and a misleading claim of live routing.
 
 ## Next sensible slice
 
-After the scaffold, the smallest meaningful vertical integration is Gemini-backed report parsing behind `ReasoningAdapter`, with its output reviewed by a human before it becomes a world-state event. A later OR-Tools adapter can optimize against the same resource, incident, and route records while retaining deterministic fixtures for tests.
+Report parsing and the five chief roles now run on IFM K2 behind `ReasoningAdapter`. The next slice is human approval: turning a parsed draft into an incident and an accepted recommendation into a world-state event. A later OR-Tools adapter can optimize against the same resource, incident, and route records while retaining deterministic fixtures for tests.

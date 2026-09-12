@@ -75,25 +75,128 @@ export interface AgentRecommendation {
   status: 'pending' | 'accepted' | 'dismissed';
 }
 
+export type WorldStateEventType =
+  | 'incident_reported'
+  | 'road_changed'
+  | 'resource_dispatched'
+  | 'facility_updated'
+  | 'flood_triggered'
+  | 'bridge_closed'
+  | 'zone_connectivity_changed'
+  | 'report_queued'
+  | 'report_applied'
+  | 'plan_proposed'
+  | 'plan_approved'
+  | 'scenario_reset';
+
 export interface WorldStateEvent {
   id: string;
   occurredAt: string;
-  type: 'incident_reported' | 'road_changed' | 'resource_dispatched' | 'facility_updated';
+  type: WorldStateEventType;
   message: string;
   entityIds: string[];
+  /** Revision the world state reached when this event was appended. */
+  revision?: number;
+}
+
+/**
+ * ── Connectivity state ────────────────────────────────────────────────────────
+ * Whether a zone can reach the command center. Independent of report sync state
+ * and of resource assignment state; see docs/IMPLEMENTATION_CONTRACT.md.
+ */
+export type ZoneConnectivity = 'online' | 'degraded' | 'offline';
+
+export interface Zone {
+  id: string;
+  name: string;
+  connectivity: ZoneConnectivity;
+  facilityIds: string[];
+  incidentIds: string[];
+  connectivityChangedAt: string;
+}
+
+export interface Bridge {
+  id: string;
+  name: string;
+  status: 'open' | 'closed';
+  /** Routes that become unusable while this bridge is closed. */
+  routeIds: string[];
+  connectsZoneIds: [string, string];
+  /** Always true: this is a modeled crossing, not a live infrastructure feed. */
+  synthetic: true;
+}
+
+/**
+ * ── Report synchronization state ──────────────────────────────────────────────
+ * A field report's journey from an offline device to applied world state.
+ * `clientReportId` is the idempotency key and is generated on the device.
+ */
+export type FieldReportSyncState = 'queued' | 'pending' | 'applied' | 'duplicate' | 'rejected';
+
+export interface FieldReport {
+  clientReportId: string;
+  zoneId: string;
+  body: string;
+  capturedAt: string;
+  syncState: FieldReportSyncState;
+  appliedAt?: string;
+  /** Set once the report has been turned into an incident draft. */
+  incidentId?: string;
+  rejectionReason?: string;
+}
+
+/**
+ * ── Resource assignment state ─────────────────────────────────────────────────
+ * A plan is the reviewable unit. Resources move to `assigned` only when a plan
+ * is approved by a human.
+ */
+export type AllocationProvider = 'seeded' | 'mock' | 'or_tools';
+export type ResourcePlanStatus = 'proposed' | 'approved' | 'superseded' | 'rejected';
+
+export interface PlanShortfall {
+  incidentId: string;
+  missingCapabilities: string[];
+  reason: string;
+}
+
+/** Every number here is modeled for the exercise, never measured. */
+export interface SyntheticImpactForecast {
+  synthetic: true;
+  peopleReachableWithin30Min: number;
+  unmetCapabilityCount: number;
+  modeledTotalTravelMinutes: number;
+}
+
+export interface ResourcePlan {
+  id: string;
+  status: ResourcePlanStatus;
+  createdAt: string;
+  /** Revision the plan was computed against; used to detect a stale approval. */
+  basedOnRevision: number;
+  generatedBy: AllocationProvider;
+  assignments: Assignment[];
+  rationale: string;
+  shortfalls: PlanShortfall[];
+  forecast: SyntheticImpactForecast;
 }
 
 export interface Scenario {
   id: string;
   name: string;
   city: 'Pittsburgh';
+  /** Monotonic counter. Increments by exactly one per applied command. */
+  revision: number;
   simulatedTime: string;
   status: 'monitoring' | 'active' | 'stabilizing';
   facilities: Facility[];
   resources: Resource[];
   incidents: Incident[];
   routes: Route[];
+  zones: Zone[];
+  bridges: Bridge[];
   assignments: Assignment[];
+  plans: ResourcePlan[];
+  reports: FieldReport[];
   recommendations: AgentRecommendation[];
   events: WorldStateEvent[];
 }

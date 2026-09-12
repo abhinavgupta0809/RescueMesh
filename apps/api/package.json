@@ -7,7 +7,9 @@
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "ifm:check": "tsx src/scripts/check-ifm.ts",
+    "k2": "tsx src/scripts/k2.ts"
   },
   "dependencies": {
     "@rescuemesh/shared": "*",

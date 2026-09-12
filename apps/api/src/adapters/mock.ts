@@ -64,13 +64,3 @@ export class MockEdgeIntelligenceAdapter implements EdgeIntelligenceAdapter {
     return 'offline-ready' as const;
   }
 }
-
-export const adapters = {
-  reasoning: new MockReasoningAdapter(),
-  allocation: new MockAllocationAdapter(),
-  worldState: new MockWorldStateStore(),
-  geography: new MockGeographyAdapter(),
-  voice: new MockVoiceAdapter(),
-  identity: new MockIdentityAdapter(),
-  edge: new MockEdgeIntelligenceAdapter()
-};

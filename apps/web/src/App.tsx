@@ -1,5 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
-import { pittsburghFloodScenario, type Scenario, type Severity } from '@rescuemesh/shared';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  pittsburghFloodScenario,
+  type AgentRecommendation,
+  type HealthResponse,
+  type IncidentDraft,
+  type ParseReportResponse,
+  type ReasoningSource,
+  type RecommendationsResponse,
+  type Scenario,
+  type Severity
+} from '@rescuemesh/shared';
 
 const apiUrl = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
 const severityOrder: Record<Severity, number> = { critical: 0, high: 1, moderate: 2, low: 3 };
@@ -11,9 +21,32 @@ const agentNames = {
   logistics_chief: 'Logistics Chief'
 };
 
+const presetReports = [
+  'Parkway East inbound near Squirrel Hill tunnel — water over both lanes, a sedan is submerged to the windows and two people are on the roof.',
+  'South Side Works parking deck, ground level flooding fast. No injuries seen, about forty cars stranded and the ramp is blocked.'
+];
+
+/** Short label for the model that produced a result, or the seeded fixture. */
+const sourceLabel = (source: ReasoningSource | undefined): string => {
+  if (!source) return 'seeded';
+  if (source.provider === 'ifm') return source.model.split('/').at(-1) ?? source.model;
+  return source.degraded ? 'mock fallback' : 'mock';
+};
+
+interface RecommendationCard {
+  recommendation: AgentRecommendation;
+  source?: ReasoningSource;
+}
+
 export function App() {
   const [scenario, setScenario] = useState<Scenario>(pittsburghFloodScenario);
   const [connection, setConnection] = useState<'connecting' | 'live' | 'demo'>('connecting');
+  const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [cards, setCards] = useState<RecommendationCard[]>(() =>
+    pittsburghFloodScenario.recommendations.map((recommendation) => ({ recommendation }))
+  );
+  const [chiefsBusy, setChiefsBusy] = useState(false);
+  const [chiefsError, setChiefsError] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -24,6 +57,7 @@ export function App() {
       })
       .then((data) => {
         setScenario(data);
+        setCards(data.recommendations.map((recommendation) => ({ recommendation })));
         setConnection('live');
       })
       .catch((error: unknown) => {
@@ -33,12 +67,43 @@ export function App() {
     return () => controller.abort();
   }, []);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`${apiUrl}/health`, { signal: controller.signal })
+      .then((response) => (response.ok ? (response.json() as Promise<HealthResponse>) : null))
+      .then((data) => {
+        if (data) setHealth(data);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, []);
+
+  const runChiefs = useCallback(() => {
+    setChiefsBusy(true);
+    setChiefsError(null);
+    fetch(`${apiUrl}/api/recommendations`)
+      .then((response) => {
+        if (!response.ok) throw new Error(`API returned ${response.status}`);
+        return response.json() as Promise<RecommendationsResponse>;
+      })
+      .then((data) => setCards(data.items))
+      .catch((error: unknown) => {
+        setChiefsError(error instanceof Error ? error.message : 'Request failed');
+      })
+      .finally(() => setChiefsBusy(false));
+  }, []);
+
   const incidents = useMemo(
     () =>
       [...scenario.incidents].sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]),
     [scenario]
   );
   const available = scenario.resources.filter((resource) => resource.status === 'available').length;
+  const reasoningBadge = health
+    ? health.reasoning.configured
+      ? `${health.reasoning.model.split('/').at(-1)} live`
+      : 'Deterministic mock'
+    : '5 roles online';
 
   return (
     <main>
@@ -184,13 +249,21 @@ export function App() {
         </section>
 
         <section className="panel agents-panel">
-          <PanelHeader
-            kicker="04 / Decision layer"
-            title="AI chief recommendations"
-            badge="5 roles online"
-          />
+          <header className="panel-header">
+            <div>
+              <p className="eyebrow">04 / Decision layer</p>
+              <h2>AI chief recommendations</h2>
+            </div>
+            <div className="header-actions">
+              <span className="badge">{reasoningBadge}</span>
+              <button type="button" onClick={runChiefs} disabled={chiefsBusy}>
+                {chiefsBusy ? 'Consulting…' : 'Ask the chiefs'}
+              </button>
+            </div>
+          </header>
+          {chiefsError ? <p className="panel-error">{chiefsError}</p> : null}
           <div className="recommendations">
-            {scenario.recommendations.map((recommendation) => (
+            {cards.map(({ recommendation, source }) => (
               <article className="recommendation" key={recommendation.id}>
                 <div className="agent-avatar">
                   {agentNames[recommendation.agent]
@@ -202,7 +275,8 @@ export function App() {
                 <div>
                   <p className="agent-name">
                     {agentNames[recommendation.agent]} ·{' '}
-                    {Math.round(recommendation.confidence * 100)}%
+                    {Math.round(recommendation.confidence * 100)}% ·{' '}
+                    <em title={source?.warning ?? undefined}>{sourceLabel(source)}</em>
                   </p>
                   <strong>{recommendation.summary}</strong>
                   <p>{recommendation.action}</p>
@@ -236,6 +310,8 @@ export function App() {
             ))}
           </div>
         </section>
+
+        <ReportConsole />
       </div>
 
       <footer>
@@ -245,6 +321,110 @@ export function App() {
         <span>RescueMesh v0.1</span>
       </footer>
     </main>
+  );
+}
+
+function ReportConsole() {
+  const [report, setReport] = useState(presetReports[0] ?? '');
+  const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState<{ incident: IncidentDraft; source: ReasoningSource } | null>(
+    null
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = () => {
+    if (!report.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    fetch(`${apiUrl}/api/reports/parse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ report })
+    })
+      .then(async (response) => {
+        const body: unknown = await response.json();
+        if (!response.ok) {
+          const message =
+            typeof body === 'object' && body !== null && 'error' in body
+              ? String((body as { error: unknown }).error)
+              : `API returned ${response.status}`;
+          throw new Error(message);
+        }
+        return body as ParseReportResponse;
+      })
+      .then(setDraft)
+      .catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : 'Request failed');
+        setDraft(null);
+      })
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <section className="panel report-panel">
+      <PanelHeader
+        kicker="06 / Intake"
+        title="Field report → structured incident"
+        badge="Human review required"
+      />
+      <div className="report-body">
+        <div className="report-input">
+          <label className="eyebrow" htmlFor="field-report">
+            Radio or phone report
+          </label>
+          <textarea
+            id="field-report"
+            value={report}
+            rows={5}
+            onChange={(event) => setReport(event.target.value)}
+            placeholder="Describe what the caller reported…"
+          />
+          <div className="report-actions">
+            {presetReports.map((preset, index) => (
+              <button
+                type="button"
+                className="ghost"
+                key={preset}
+                onClick={() => setReport(preset)}
+              >
+                Preset {index + 1}
+              </button>
+            ))}
+            <button type="button" onClick={submit} disabled={busy || !report.trim()}>
+              {busy ? 'Parsing…' : 'Parse report'}
+            </button>
+          </div>
+        </div>
+        <div className="report-output" aria-live="polite">
+          {error ? <p className="panel-error">{error}</p> : null}
+          {!error && !draft ? (
+            <p className="report-hint">
+              Parses one report into a reviewable incident draft. Nothing is dispatched — a
+              commander approves before it becomes a world-state event.
+            </p>
+          ) : null}
+          {draft ? (
+            <article className="draft">
+              <div className="draft-head">
+                <span className={`severity ${draft.incident.severity}`}>
+                  {draft.incident.severity}
+                </span>
+                <span className="draft-source" title={draft.source.warning ?? undefined}>
+                  {draft.source.provider === 'ifm' ? 'IFM' : 'Mock'} · {sourceLabel(draft.source)}
+                </span>
+              </div>
+              <strong>{draft.incident.title}</strong>
+              <p>{draft.incident.description}</p>
+              {draft.source.degraded ? (
+                <p className="draft-warning">
+                  IFM call failed, so the deterministic mock answered: {draft.source.warning}
+                </p>
+              ) : null}
+            </article>
+          ) : null}
+        </div>
+      </div>
+    </section>
   );
 }
 
