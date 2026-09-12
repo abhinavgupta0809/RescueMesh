@@ -1343,3 +1343,33 @@ footer {
       border-color 0.15s;
   }
 }
+
+/* Persistent reset: reachable from the top of the page at any scroll position. */
+.reset-persistent {
+  margin-left: 12px;
+  padding: 5px 12px;
+  border: 1px solid #7a4a4a;
+  background: #2a1a1a;
+  color: #f0c0c0;
+  font-size: 11px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.reset-persistent:hover:enabled {
+  background: #3a2222;
+  border-color: #a86a6a;
+}
+.reset-persistent:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.reset-persistent:focus-visible {
+  outline: 2px solid #9fd0ff;
+  outline-offset: 2px;
+}
+@media (max-width: 720px) {
+  .reset-persistent {
+    margin-left: 0;
+    width: 100%;
+  }
+}

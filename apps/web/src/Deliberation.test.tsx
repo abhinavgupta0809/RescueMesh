@@ -126,10 +126,20 @@ describe('public deliberation presentation', () => {
       errors: [{ code: 'timeout', stage: 'synthesis', message: 'Timed out', at: 'test' }]
     });
     const html = render(view(s));
+    // Exactly the substituted contributions are marked: the Medical Chief
+    // opening position and the fallback synthesis. Nothing else.
     expect(html.match(/>Scripted fallback<\/strong>/g)).toHaveLength(2);
     expect(html).toContain('recorded-deliberation-v1');
-    expect(html).toContain('Degraded warning');
-    expect(html).toContain('Attempted provider: Gemini');
+    // The session-wide degraded banner must NOT appear on successful cards.
+    expect(html).not.toContain('Degraded warning');
+    expect(html).toContain('This contribution used the recorded fallback');
+    // One concise session summary names what fell back and what did not.
+    expect(html).toContain('9 of 11 contributions came from Gemini');
+    expect(html).toContain('Medical Chief opening position');
+    // The four live chiefs read as Gemini, not as scripted or broken.
+    expect(html.match(/>Gemini<\/strong>/g)?.length ?? 0).toBeGreaterThanOrEqual(4);
+    // Raw provider detail is collapsed, not in the primary interface.
+    expect(html).toContain('Technical details');
   });
   it('labels every recorded section as fallback and displays offline and stale warnings', () => {
     const html = render(

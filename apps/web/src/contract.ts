@@ -19,6 +19,7 @@ export type {
   FieldReportSyncState,
   Incident,
   ReasoningProvider,
+  ProvenanceSummary,
   ReasoningSource,
   ApprovableAction,
   ApproveRecommendationResponse,

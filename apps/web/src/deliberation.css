@@ -291,3 +291,151 @@
   gap: 6px;
   margin-top: 7px;
 }
+
+/* Decision brief: the answer, before the debate. */
+.decision-brief {
+  margin: 0 0 14px;
+  padding: 16px 18px;
+  border: 1px solid #2f5a44;
+  border-left: 4px solid #4ea87a;
+  background: rgba(20, 38, 30, 0.55);
+  border-radius: 4px;
+}
+.decision-brief-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.decision-brief-head h2 {
+  margin: 0;
+  font-size: 17px;
+}
+.decision-brief-tag {
+  color: #8fbfa4;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.decision-brief-provenance {
+  margin: 0 0 12px;
+  color: #9db4c6;
+  font-size: 11px;
+}
+.decision-brief-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+.decision-brief-grid h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #a9c4d6;
+}
+.decision-brief-grid p,
+.decision-brief-grid li {
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.decision-actions {
+  margin: 0;
+  padding-left: 18px;
+}
+.decision-actions li {
+  margin-bottom: 6px;
+}
+.decision-dispute {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid #6a5a2a;
+  background: rgba(46, 38, 16, 0.5);
+  border-radius: 3px;
+}
+.decision-dispute h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  color: #e2c98a;
+}
+.decision-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: 16px;
+}
+.approve-primary {
+  padding: 10px 18px;
+  border: 0;
+  border-radius: 3px;
+  background: #4ea87a;
+  color: #06180f;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+}
+.approve-primary:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.approve-primary:focus-visible,
+.decision-actions-row .secondary:focus-visible {
+  outline: 2px solid #9fd0ff;
+  outline-offset: 2px;
+}
+.decision-actions-row .secondary {
+  padding: 9px 14px;
+  border: 1px solid #3f5266;
+  background: transparent;
+  color: #b9c9d8;
+  border-radius: 3px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.decision-approval-note {
+  margin: 0;
+  color: #8b93a6;
+  font-size: 10px;
+  flex-basis: 100%;
+}
+.deliberation-provenance-summary {
+  margin: 0 0 10px;
+  color: #9db4c6;
+  font-size: 11px;
+}
+.deliberation-technical > summary,
+.deliberation-full-debate > summary {
+  cursor: pointer;
+  color: #8fa6bd;
+  font-size: 11px;
+  padding: 6px 0;
+}
+.deliberation-technical > summary:focus-visible,
+.deliberation-full-debate > summary:focus-visible {
+  outline: 2px solid #9fd0ff;
+  outline-offset: 2px;
+}
+.deliberation-technical ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: #b3bccb;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 720px) {
+  .decision-brief {
+    padding: 12px;
+  }
+  .decision-brief-grid {
+    grid-template-columns: 1fr;
+  }
+  .approve-primary,
+  .decision-actions-row .secondary {
+    width: 100%;
+  }
+}

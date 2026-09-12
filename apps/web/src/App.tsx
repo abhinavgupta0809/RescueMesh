@@ -8,6 +8,8 @@ import { AdviceRequests, ChiefAdvice, emptyAdvice, type ApprovalOutcomes } from 
 import { readQueue, writeQueue } from './offline-queue';
 import { OperatingMap } from './OperatingMap';
 import { Deliberation } from './Deliberation';
+import { DecisionBrief } from './DecisionBrief';
+import { summarizeProvenance } from '@rescuemesh/shared';
 import { defaultExercise } from './ExerciseBuilder';
 import {
   DISASTER_PRESENTATION,
@@ -411,6 +413,15 @@ export function App() {
             <option value="api">Backend API</option>
           </select>
         </label>
+        <button
+          type="button"
+          className="reset-persistent"
+          aria-label="Reset exercise to its starting state"
+          disabled={!!busy}
+          onClick={() => setResetOpen(true)}
+        >
+          Reset exercise
+        </button>
       </div>
       {error && (
         <div role="alert" className="message error">
@@ -767,6 +778,30 @@ export function App() {
               </section>
             </div>
           </div>
+          {/* Decision first, debate second: a judge sees the plan before the
+              ten discussion cards. */}
+          {deliberation.session?.finalBrief && (
+            <DecisionBrief
+              session={deliberation.session}
+              scenario={scenario}
+              provenance={summarizeProvenance(deliberation.session)}
+              {...(deliberation.session.planId ? { planId: deliberation.session.planId } : {})}
+              busy={!!busy || !!approving}
+              stale={deliberation.session.status === 'stale'}
+              onApprove={() => {
+                const proposed = scenario.plans.find((p) => p.status === 'proposed');
+                if (!proposed) return;
+                void run('Plan approval', async () => {
+                  await send(makeCommand('plan.approve', { planId: proposed.id }));
+                });
+              }}
+              onAlternate={() => {
+                void run('Plan proposal', async () => {
+                  await send(makeCommand('plan.propose', {}));
+                });
+              }}
+            />
+          )}
           <Deliberation
             view={deliberation}
             scenario={scenario}
@@ -1043,9 +1078,15 @@ export function App() {
           >
             <h2 id="reset-title">Reset this exercise?</h2>
             <p>
-              Restore the seed, clear proposed plans and remove {queue.length} locally queued
-              report(s) from {mode} mode.
+              Return the exercise to its original starting state? This clears the current disasters,
+              deliberation, plan and unsynchronized local reports.
             </p>
+            {queue.length > 0 && (
+              <p className="muted">
+                {queue.length} locally queued report{queue.length === 1 ? '' : 's'} will be
+                discarded.
+              </p>
+            )}
             <div>
               <button autoFocus onClick={() => setResetOpen(false)}>
                 Keep scenario
