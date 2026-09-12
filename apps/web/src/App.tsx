@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { createClient, makeCommand, ApiError } from './api-client';
 import type { Command, FieldReport, FrontendClient, Scenario } from './contract';
-import { AdviceRequests, ChiefAdvice, emptyAdvice } from './ChiefAdvice';
+import { AdviceRequests, ChiefAdvice, emptyAdvice, type ApprovalOutcomes } from './ChiefAdvice';
 import { readQueue, writeQueue } from './offline-queue';
 import { OperatingMap } from './OperatingMap';
 
@@ -31,6 +31,8 @@ export function App() {
   const stateRef = useRef(scenario);
   stateRef.current = scenario;
   const [advice, setAdvice] = useState(emptyAdvice);
+  const [approvals, setApprovals] = useState<ApprovalOutcomes>({});
+  const [approving, setApproving] = useState('');
   const adviceRequests = useRef(new AdviceRequests());
   const worldRead = useRef(0);
   const [stateFresh, setStateFresh] = useState(false);
@@ -62,6 +64,7 @@ export function App() {
     }
     void adviceRequests.current.load(() => active.recommendations(), setAdvice);
   }, []);
+
   const refresh = useCallback(
     async (active: FrontendClient) => {
       const generation = ++worldRead.current;
@@ -74,6 +77,44 @@ export function App() {
       loadAdvice(active);
     },
     [loadAdvice]
+  );
+  /**
+   * Approving advice asks the engine for a PROPOSED plan. It is deliberately a
+   * separate step from dispatching that plan, which still needs plan.approve.
+   */
+  const approveAdvice = useCallback(
+    (recommendationId: string, analyzedRevision: number) => {
+      setApproving(recommendationId);
+      void client.current
+        .approveAdvice(recommendationId, analyzedRevision)
+        .then(async (outcome) => {
+          setApprovals((current) => ({ ...current, [recommendationId]: outcome }));
+          if (outcome.ok) {
+            await refresh(client.current);
+            loadAdvice(client.current);
+          }
+        })
+        .catch((error: unknown) => {
+          setApprovals((current) => ({
+            ...current,
+            [recommendationId]: {
+              ok: false,
+              recommendationId,
+              revision: -1,
+              refusal: {
+                code: 'not_found',
+                message:
+                  error instanceof ApiError
+                    ? error.message
+                    : 'The approval could not be sent. Nothing was executed.'
+              }
+            }
+          }));
+        })
+        .finally(() => setApproving(''));
+    },
+    // `refresh` and `loadAdvice` are stable useCallbacks; client is a ref.
+    [loadAdvice, refresh]
   );
   useEffect(() => {
     const active = createClient(mode);
@@ -627,6 +668,9 @@ export function App() {
                     online={online}
                     disabled={!!busy}
                     onRefresh={() => loadAdvice(client.current)}
+                    onApprove={approveAdvice}
+                    approvals={approvals}
+                    approving={approving}
                   />
                 </details>
               </section>

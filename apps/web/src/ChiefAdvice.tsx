@@ -1,4 +1,4 @@
-import type { Recommendation } from './contract';
+import type { ApproveRecommendationResponse, Recommendation } from './contract';
 
 export interface AdviceState {
   items: Recommendation[];
@@ -31,17 +31,26 @@ export class AdviceRequests {
   }
 }
 
+/** Outcome of the most recent approval, keyed by recommendation id. */
+export type ApprovalOutcomes = Record<string, ApproveRecommendationResponse>;
+
 export function ChiefAdvice({
   advice,
   revision,
   online,
   onRefresh,
+  onApprove,
+  approvals,
+  approving,
   disabled
 }: {
   advice: AdviceState;
   revision: number;
   online: boolean;
   onRefresh: () => void;
+  onApprove: (recommendationId: string, analyzedRevision: number) => void;
+  approvals: ApprovalOutcomes;
+  approving: string;
   disabled: boolean;
 }) {
   return (
@@ -96,6 +105,34 @@ export function ChiefAdvice({
               </p>
             )}
             {source.warning && <small>{source.warning}</small>}
+            {r.proposedAction ? (
+              <div className="advice-approve">
+                <button
+                  disabled={disabled || stale || approving === r.id || r.status !== 'pending'}
+                  onClick={() => onApprove(r.id, analyzedRevision)}
+                >
+                  {approving === r.id ? 'Approving…' : 'Approve — request a plan'}
+                </button>
+                <small>
+                  Approving asks the deterministic engine for a <strong>proposed</strong> plan. It
+                  does not dispatch: review the plan and approve it separately to commit units.
+                </small>
+              </div>
+            ) : (
+              <small>Advisory only — no engine action; act through the operator controls.</small>
+            )}
+            {approvals[r.id] &&
+              (approvals[r.id]?.refusal ? (
+                <p role="alert" className="amber">
+                  Not executed ({approvals[r.id]?.refusal?.code}):{' '}
+                  {approvals[r.id]?.refusal?.message}
+                </p>
+              ) : (
+                <p role="status" className="advice-approved">
+                  Engine accepted the request at revision {approvals[r.id]?.revision}. A proposed
+                  plan is waiting for your review — nothing is dispatched yet.
+                </p>
+              ))}
           </article>
         );
       })}

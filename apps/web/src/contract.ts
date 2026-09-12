@@ -20,6 +20,8 @@ export type {
   Incident,
   ReasoningProvider,
   ReasoningSource,
+  ApprovableAction,
+  ApproveRecommendationResponse,
   Resource,
   Route,
   Scenario,
@@ -32,6 +34,7 @@ export type {
 } from '@rescuemesh/shared';
 
 import type {
+  ApproveRecommendationResponse,
   CommandResultMap,
   RecommendationResponse,
   Scenario as SharedScenario,
@@ -68,4 +71,13 @@ export interface FrontendClient {
   poll(revision: number): Promise<SharedScenario | null>;
   recommendations(): Promise<Recommendation[]>;
   command(command: SharedCommand): Promise<SharedCommandResponse>;
+  /**
+   * Approves a chief's supported proposed action. The backend maps it to an
+   * existing engine command; this produces a PROPOSED plan for operator review,
+   * it does not dispatch anything.
+   */
+  approveAdvice(
+    recommendationId: string,
+    analyzedRevision: number
+  ): Promise<ApproveRecommendationResponse>;
 }

@@ -8,7 +8,8 @@ preserved. No new scenario control or endpoint has been invented.
 ## Runtime boundaries
 
 - The existing `@rescuemesh/engine` TypeScript engine owns every simulation transition.
-  Local mock mode now wraps this same engine; the separate browser reducer is removed.
+  Local mock mode wraps this same engine; the separate browser reducer is removed. It also
+  mirrors the backend approval boundary, so advice approval behaves identically in both modes.
 - Gemini supplies advisory chiefs through the backend. No provider SDK, provider URL,
   key or secret is read by browser code. Codex and Claude are development tools only.
 - Chief prose is never submitted as executable state. The committed contract exposes
@@ -107,10 +108,23 @@ use the backend Gemini adapter with injected model responses. Native desktop int
 were checked in the earlier implementation; new desktop/mobile screenshot verification is
 not claimed. The historical visual QA limitations are retained in `design-qa.md`.
 
-Claude's remaining ownership: remove retained IFM development tooling/types and old ownership
-wording from the backend/shared/docs if required by the final architecture. No frontend runtime
-imports those clients or accepts IFM chief provenance. No advance-scenario endpoint exists in
-the integrated baseline; any future control waits for an explicit deterministic contract.
-If direct chief-advice acceptance is desired beyond plan review, Claude must define its typed
-command and revision/plan association first. Keep this result reviewable; do not merge into main
-automatically.
+Resolved in the final integration:
+
+- **IFM/K2 is gone from the runtime.** `ReasoningProvider` is now `'gemini' | 'mock'` and
+  `HealthResponse.mode` no longer has `'ifm-live'`. No frontend code references either.
+- **Chief-advice acceptance now has a typed contract.** `AgentRecommendation.proposedAction`
+  is an optional `ApprovableAction` (today: `plan.propose` only). `client.approveAdvice(id,
+analyzedRevision)` posts to `POST /api/recommendations/approve`; the backend maps it to an
+  existing engine command and the engine validates it. Approving produces a **proposed plan**
+  for review — it does not dispatch. Dispatch still requires the separate `plan.approve`
+  command, unchanged.
+- **Stale advice cannot execute.** The approval carries the revision the advice analyzed;
+  the backend refuses with `stale_recommendation` unless it still matches world state. The
+  Approve button is disabled while advice is stale.
+- **An advance-scenario endpoint now exists** (`POST /api/scenario/advance`,
+  `GET /api/scenario/script`) for a recorded deterministic six-step sequence. It is
+  **deliberately not wired into the UI**: the existing operator controls already cover the
+  agreed demo, and rebuilding them was out of scope. Its results carry
+  `source: { kind: 'scripted' }` and must never be labelled as AI generation.
+
+Keep this result reviewable; do not merge into main automatically.

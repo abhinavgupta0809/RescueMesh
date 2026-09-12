@@ -7,6 +7,8 @@ export const createSeed = (): Scenario => structuredClone(pittsburghFloodScenari
 /** Local transport, same deterministic engine. No cloud clients or duplicate simulation rules. */
 export function createMockClient(): FrontendClient {
   const engine = new SimulationEngine();
+  /** Revision the last served advice analyzed, so staleness matches the backend. */
+  let lastAdviceRevision = -1;
   return {
     mode: 'mock',
     scenario: async () => engine.scenario,
@@ -14,16 +16,76 @@ export function createMockClient(): FrontendClient {
     command: async (command) => engine.execute(command),
     recommendations: async () => {
       const state = engine.scenario;
+      lastAdviceRevision = state.revision;
       return state.recommendations.map((recommendation) => ({
-        recommendation: { ...recommendation, status: 'pending' },
+        recommendation: {
+          ...recommendation,
+          status: 'pending' as const,
+          // Mirrors the backend mock: only the commander's advice maps to a
+          // supported engine command, so the UI must handle both cases.
+          ...(recommendation.agent === 'incident_commander' && recommendation.relatedIncidentId
+            ? {
+                proposedAction: {
+                  kind: 'plan.propose' as const,
+                  incidentIds: [recommendation.relatedIncidentId]
+                }
+              }
+            : {})
+        },
         analyzedRevision: state.revision,
         source: {
-          provider: 'mock',
+          provider: 'mock' as const,
           model: 'scripted-chief-fixture',
           degraded: false,
           warning: 'Scripted advisory fixture. Cloud reasoning is not used in local mock mode.'
         }
       }));
+    },
+    /**
+     * Local equivalent of the backend approval boundary: same staleness rule,
+     * same translation to an existing engine command, same distinction between
+     * proposing a plan and dispatching one.
+     */
+    approveAdvice: async (recommendationId, analyzedRevision) => {
+      const state = engine.scenario;
+      const found = state.recommendations.find((r) => r.id === recommendationId);
+      if (!found)
+        return {
+          ok: false,
+          recommendationId,
+          revision: state.revision,
+          refusal: { code: 'not_found', message: 'No such recommendation. Refresh chief advice.' }
+        };
+      if (analyzedRevision !== state.revision || lastAdviceRevision !== state.revision)
+        return {
+          ok: false,
+          recommendationId,
+          revision: state.revision,
+          refusal: {
+            code: 'stale_recommendation',
+            message: `Advice analyzed revision ${analyzedRevision} but world state is at ${state.revision}. Refresh chief advice to revalidate.`,
+            currentRevision: state.revision
+          }
+        };
+      if (found.agent !== 'incident_commander' || !found.relatedIncidentId)
+        return {
+          ok: false,
+          recommendationId,
+          revision: state.revision,
+          refusal: {
+            code: 'advisory_only',
+            message:
+              'This recommendation is advisory only. Act on it through the operator controls.'
+          }
+        };
+      const command = engine.execute({
+        type: 'plan.propose',
+        commandId: `approve-${recommendationId}-${state.revision}`,
+        issuedAt: new Date().toISOString(),
+        payload: { incidentIds: [found.relatedIncidentId] }
+      });
+      lastAdviceRevision = -1;
+      return { ok: command.ok, recommendationId, revision: engine.revision, command };
     }
   };
 }

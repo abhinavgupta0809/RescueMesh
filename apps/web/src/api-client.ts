@@ -1,4 +1,5 @@
 import type {
+  ApproveRecommendationResponse,
   Command,
   CommandResponse,
   FrontendClient,
@@ -48,16 +49,22 @@ export function validateScenario(value: unknown): Scenario {
   return s as Scenario;
 }
 export function createHttpClient(baseUrl: string): FrontendClient {
-  async function request(path: string, command?: Command, timeoutMs = 8000): Promise<unknown> {
+  async function request(
+    path: string,
+    command?: Command,
+    timeoutMs = 8000,
+    body?: unknown
+  ): Promise<unknown> {
+    const payload = command ?? body;
     let response: Response;
     try {
       response = await fetch(`${baseUrl.replace(/\/$/, '')}${path}`, {
         signal: AbortSignal.timeout(timeoutMs),
-        ...(command
+        ...(payload
           ? {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(command)
+              body: JSON.stringify(payload)
             }
           : {})
       });
@@ -74,7 +81,7 @@ export function createHttpClient(baseUrl: string): FrontendClient {
     }
     if (
       !response.ok &&
-      !(command && typeof data === 'object' && data !== null && 'ok' in data && data.ok === false)
+      !(payload && typeof data === 'object' && data !== null && 'ok' in data && data.ok === false)
     )
       throw new ApiError(`API request failed (${response.status}).`);
     return data;
@@ -137,6 +144,15 @@ export function createHttpClient(baseUrl: string): FrontendClient {
           'contract_mismatch'
         );
       return result.items;
+    },
+    approveAdvice: async (recommendationId, analyzedRevision) => {
+      const result = (await request('/api/recommendations/approve', undefined, 8000, {
+        recommendationId,
+        analyzedRevision
+      })) as ApproveRecommendationResponse;
+      if (typeof result?.ok !== 'boolean' || !Number.isInteger(result.revision))
+        throw new ApiError('Invalid approval acknowledgement.', 'contract_mismatch');
+      return result;
     },
     command: async (command) => {
       const result = (await request('/api/commands', command)) as CommandResponse;
