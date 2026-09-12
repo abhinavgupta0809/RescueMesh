@@ -5,6 +5,13 @@ import type { Command, FieldReport, FrontendClient, Scenario } from './contract'
 import { AdviceRequests, ChiefAdvice, emptyAdvice, type ApprovalOutcomes } from './ChiefAdvice';
 import { readQueue, writeQueue } from './offline-queue';
 import { OperatingMap } from './OperatingMap';
+import { Deliberation } from './Deliberation';
+import {
+  DeliberationRunner,
+  canApproveSession,
+  emptyDeliberation,
+  isDeliberating
+} from './deliberation-runner';
 
 const kindNames = {
   ambulance: 'Ambulances',
@@ -31,6 +38,9 @@ export function App() {
   const stateRef = useRef(scenario);
   stateRef.current = scenario;
   const [advice, setAdvice] = useState(emptyAdvice);
+  const [deliberation, setDeliberation] = useState(emptyDeliberation);
+  const runner = useRef<DeliberationRunner | null>(null);
+  runner.current ??= new DeliberationRunner(setDeliberation);
   const [approvals, setApprovals] = useState<ApprovalOutcomes>({});
   const [approving, setApproving] = useState('');
   const adviceRequests = useRef(new AdviceRequests());
@@ -65,19 +75,16 @@ export function App() {
     void adviceRequests.current.load(() => active.recommendations(), setAdvice);
   }, []);
 
-  const refresh = useCallback(
-    async (active: FrontendClient) => {
-      const generation = ++worldRead.current;
-      const value = await active.scenario();
-      if (client.current !== active || generation !== worldRead.current) return;
-      stateRef.current = value;
-      setScenario(value);
-      setStateFresh(true);
-      setLastSync(clock(value.simulatedTime));
-      loadAdvice(active);
-    },
-    [loadAdvice]
-  );
+  const refresh = useCallback(async (active: FrontendClient) => {
+    const generation = ++worldRead.current;
+    const value = await active.scenario();
+    if (client.current !== active || generation !== worldRead.current) return;
+    stateRef.current = value;
+    setScenario(value);
+    setStateFresh(true);
+    setLastSync(clock(value.simulatedTime));
+    runner.current!.observe(value);
+  }, []);
   /**
    * Approving advice asks the engine for a PROPOSED plan. It is deliberately a
    * separate step from dispatching that plan, which still needs plan.approve.
@@ -119,6 +126,7 @@ export function App() {
   useEffect(() => {
     const active = createClient(mode);
     client.current = active;
+    runner.current!.reset();
     setScenario(null);
     adviceRequests.current.invalidate();
     setAdvice(emptyAdvice);
@@ -156,7 +164,7 @@ export function App() {
           stateRef.current = next;
           setScenario(next);
           setLastSync(clock(next.simulatedTime));
-          loadAdvice(active);
+          runner.current!.observe(next);
         }
       } catch (e) {
         if (client.current === active && generation === worldRead.current) {
@@ -170,6 +178,7 @@ export function App() {
     return () => {
       clearInterval(timer);
       adviceRequests.current.invalidate();
+      runner.current!.dispose();
       worldRead.current += 1;
     };
   }, [mode, refresh, loadAdvice]);
@@ -224,7 +233,28 @@ export function App() {
     scenario?.zones.find((z) => z.id === selectedZone) ??
     scenario?.zones.find((z) => z.id === 'zone-east') ??
     scenario?.zones.at(-1);
-  const plan = scenario?.plans.find((p) => p.status === 'proposed') ?? scenario?.plans.at(-1);
+  const plan =
+    (deliberation.session?.planId
+      ? scenario?.plans.find((p) => p.id === deliberation.session!.planId)
+      : undefined) ??
+    scenario?.plans.find((p) => p.status === 'proposed') ??
+    scenario?.plans.at(-1);
+  const sessionBlocksPlan =
+    deliberation.phase !== 'idle' &&
+    !canApproveSession(deliberation, plan, scenario?.revision ?? -1);
+  function simulate() {
+    if (
+      locked.current ||
+      approving ||
+      isDeliberating(runner.current!.view) ||
+      (mode === 'api' && !online)
+    )
+      return;
+    adviceRequests.current.invalidate();
+    setAdvice(emptyAdvice);
+    const active = client.current;
+    void runner.current!.start(active, { step: 'initial_flooding' }, () => refresh(active));
+  }
   const bridge = scenario?.bridges[0];
   const available = scenario?.resources.filter((r) => r.status === 'available').length ?? 0;
   const detail =
@@ -582,6 +612,7 @@ export function App() {
                       className="primary"
                       disabled={
                         !!busy ||
+                        sessionBlocksPlan ||
                         !stateFresh ||
                         (mode === 'api' && !online) ||
                         (!!plan &&
@@ -600,8 +631,9 @@ export function App() {
                       {plan?.status === 'proposed' ? 'Approve Plan' : 'Generate Plan'}
                     </button>
                     <button
-                      disabled={!!busy}
-                      onClick={() =>
+                      disabled={!!busy || isDeliberating(deliberation)}
+                      onClick={() => {
+                        runner.current!.reset();
                         act(
                           'Alternate plan simulation',
                           makeCommand('plan.propose', {
@@ -611,8 +643,8 @@ export function App() {
                               .map((i) => i.id)
                               .reverse()
                           })
-                        )
-                      }
+                        );
+                      }}
                     >
                       Simulate Alternate Plan
                     </button>
@@ -666,7 +698,7 @@ export function App() {
                     advice={advice}
                     revision={scenario.revision}
                     online={online}
-                    disabled={!!busy}
+                    disabled={!!busy || deliberation.phase !== 'idle'}
                     onRefresh={() => loadAdvice(client.current)}
                     onApprove={approveAdvice}
                     approvals={approvals}
@@ -676,6 +708,13 @@ export function App() {
               </section>
             </div>
           </div>
+          <Deliberation
+            view={deliberation}
+            disabled={!!busy || !!approving}
+            online={online || mode === 'mock'}
+            onSimulate={simulate}
+            onResume={() => void runner.current!.resume()}
+          />
           <div className="bottom-grid">
             <section className="panel edge-panel">
               <Heading
@@ -962,6 +1001,8 @@ export function App() {
                 onClick={() => {
                   setResetOpen(false);
                   void run('Scenario reset', async () => {
+                    runner.current!.reset();
+                    setApprovals({});
                     await send(makeCommand('scenario.reset', {}));
                     saveQueue([]);
                     setSelected('');

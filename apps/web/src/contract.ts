@@ -34,6 +34,8 @@ export type {
 } from '@rescuemesh/shared';
 
 import type {
+  DeliberationSession,
+  StartSimulationRequest,
   ApproveRecommendationResponse,
   CommandResultMap,
   RecommendationResponse,
@@ -67,6 +69,12 @@ export type Recommendation = RecommendationResponse;
  */
 export interface FrontendClient {
   mode: 'mock' | 'api';
+  startSimulation(
+    request: StartSimulationRequest,
+    signal?: AbortSignal
+  ): Promise<DeliberationSession>;
+  simulation(sessionId: string, signal?: AbortSignal): Promise<DeliberationSession>;
+  finalPlan(sessionId: string, signal?: AbortSignal): Promise<DeliberationSession>;
   scenario(): Promise<SharedScenario>;
   poll(revision: number): Promise<SharedScenario | null>;
   recommendations(): Promise<Recommendation[]>;

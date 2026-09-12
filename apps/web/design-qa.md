@@ -1,6 +1,27 @@
 # Frontend design QA
 
-final result: blocked
+## Current deliberation checkpoint — 2026-09-12
+
+Result: passed for frontend alignment and responsive smoke verification. The user approved
+an isolated Playwright browser after the historical native-capture blocker below.
+
+- Isolated frontend: `http://127.0.0.1:5175`, local mock only; all other request origins blocked.
+- Desktop: 1440 × 1000. Mobile: 390 × 844. No page-width overflow or browser runtime errors.
+- Inspected full-page overview and deliberation captures at both sizes, plus readable mobile
+  chief-card and debate-row close-ups. Existing dark command-center composition, map,
+  resource panels and controls remain; new content stacks into one column on mobile.
+- Functional browser checks: flood, bridge closure, offline zone/report queue, reconnect,
+  five recorded chief positions/reviews, synthesis, approval gating, engine approval,
+  reset during deliberation and stale-session blocking. All passed at both sizes.
+- Reproducible script: `tests/browser-smoke.mjs`. Capture directory:
+  `/private/tmp/rescuemesh-qa` (`desktop-overview.png`, `desktop-deliberation.png`,
+  `mobile-overview.png`, `mobile-deliberation.png`, and per-size chief/debate close-ups).
+- This is responsive/interaction verification, not a new pixel-perfect reconstruction.
+  No live Gemini calls were made. See `README.md` for test commands and backend dependency.
+
+## Historical initial implementation checkpoint
+
+The original result below was blocked before browser-switch permission was granted.
 
 ## Evidence and scope
 
