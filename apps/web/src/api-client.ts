@@ -7,6 +7,7 @@ import type {
   Scenario
 } from './contract';
 import { createMockClient } from './mock-client';
+import { readSession } from './deliberation-contract';
 
 export class ApiError extends Error {
   constructor(
@@ -53,13 +54,16 @@ export function createHttpClient(baseUrl: string): FrontendClient {
     path: string,
     command?: Command,
     timeoutMs = 8000,
-    body?: unknown
+    body?: unknown,
+    signal?: AbortSignal
   ): Promise<unknown> {
     const payload = command ?? body;
     let response: Response;
     try {
       response = await fetch(`${baseUrl.replace(/\/$/, '')}${path}`, {
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+          : AbortSignal.timeout(timeoutMs),
         ...(payload
           ? {
               method: 'POST',
@@ -83,11 +87,48 @@ export function createHttpClient(baseUrl: string): FrontendClient {
       !response.ok &&
       !(payload && typeof data === 'object' && data !== null && 'ok' in data && data.ok === false)
     )
-      throw new ApiError(`API request failed (${response.status}).`);
+      throw new ApiError(
+        `API request failed (${response.status}). ${typeof data === 'object' && data !== null && 'message' in data && typeof data.message === 'string' ? data.message : 'No successful action has been assumed.'}`,
+        typeof data === 'object' &&
+          data !== null &&
+          'error' in data &&
+          typeof data.error === 'string'
+          ? data.error
+          : 'connection_failed'
+      );
     return data;
   }
   const client: FrontendClient = {
     mode: 'api',
+    startSimulation: async (body, signal) =>
+      readSession(await request('/api/simulations', undefined, 8000, body, signal)),
+    simulation: async (id, signal) =>
+      readSession(
+        await request(
+          `/api/simulations/${encodeURIComponent(id)}`,
+          undefined,
+          8000,
+          undefined,
+          signal
+        )
+      ),
+    finalPlan: async (id, signal) => {
+      const session = readSession(
+        await request(
+          `/api/simulations/${encodeURIComponent(id)}/final-plan`,
+          undefined,
+          8000,
+          {},
+          signal
+        )
+      );
+      if (!session.planId)
+        throw new ApiError(
+          'Engine did not confirm a candidate plan. Nothing has been approved.',
+          'contract_mismatch'
+        );
+      return session;
+    },
     scenario: async () => validateScenario(await request('/api/scenario')),
     poll: async (revision) => {
       const result = (await request(`/api/world-state?since=${revision}`)) as {
