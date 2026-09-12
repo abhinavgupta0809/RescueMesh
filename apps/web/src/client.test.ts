@@ -6,7 +6,7 @@ import type { Command, Scenario } from './contract';
 
 const report = {
   clientReportId: 'device-report-1',
-  zoneId: 'zone-c',
+  zoneId: 'zone-east',
   body: 'Synthetic school evacuation report',
   capturedAt: '2026-07-18T22:43:00Z'
 };
@@ -33,15 +33,14 @@ function invariants(s: Scenario) {
 }
 afterEach(() => vi.unstubAllGlobals());
 describe('deterministic eight-step demo', () => {
-  it('replaying a reset cannot erase subsequent commands', async () => {
+  it('reset restores the engine seed and clears the report ledger', async () => {
     const client = createMockClient();
     const reset = makeCommand('scenario.reset', {});
-    await client.command(reset);
     await client.command(makeCommand('scenario.trigger_flood', { intensity: 'severe' }));
-    const before = await client.scenario();
-    const duplicate = await client.command(reset);
-    expect(duplicate.ok && duplicate.duplicate).toBe(true);
-    expect(await client.scenario()).toEqual(before);
+    await client.command(makeCommand('report.submit', report));
+    expect((await client.scenario()).reports.length).toBeGreaterThan(0);
+    await client.command(reset);
+    expect(await client.scenario()).toEqual(createSeed());
   });
   it('flood → closure → offline report → exactly-once sync → reviewed plan → approval → reset', async () => {
     const client = createMockClient();
@@ -51,7 +50,9 @@ describe('deterministic eight-step demo', () => {
       invariants(await client.scenario());
       return response;
     }
-    await send(makeCommand('scenario.trigger_flood', { intensity: 'severe', zoneIds: ['zone-b'] }));
+    await send(
+      makeCommand('scenario.trigger_flood', { intensity: 'severe', zoneIds: ['zone-oakland'] })
+    );
     const close = makeCommand('route.close_bridge', {
       bridgeId: 'bridge-birmingham',
       closed: true
@@ -61,18 +62,25 @@ describe('deterministic eight-step demo', () => {
     const replay = await send(close);
     expect(replay.ok && replay.duplicate).toBe(true);
     expect(await client.scenario()).toEqual(beforeReplay);
-    await send(makeCommand('zone.set_connectivity', { zoneId: 'zone-c', connectivity: 'offline' }));
+    await send(
+      makeCommand('zone.set_connectivity', { zoneId: 'zone-east', connectivity: 'offline' })
+    );
+    const beforeOffline = await client.scenario();
     const offline = await client.command(makeCommand('report.submit', report));
-    expect(!offline.ok && offline.error.code).toBe('zone_offline');
-    expect((await client.scenario()).reports).toHaveLength(0);
-    await send(makeCommand('zone.set_connectivity', { zoneId: 'zone-c', connectivity: 'online' }));
+    expect(offline.ok && offline.type === 'report.submit' && offline.data.queuedOffline).toBe(true);
+    expect((await client.scenario()).incidents).toEqual(beforeOffline.incidents);
+    expect((await client.scenario()).reports[0]?.syncState).toBe('queued');
+    await send(
+      makeCommand('zone.set_connectivity', { zoneId: 'zone-east', connectivity: 'online' })
+    );
     await send(makeCommand('report.sync', { reports: [report] }));
     const synced = await client.scenario();
     const repeated = await send(makeCommand('report.sync', { reports: [report] }));
     expect(repeated.ok && repeated.type === 'report.sync' && repeated.data.duplicates).toHaveLength(
       1
     );
-    expect(await client.scenario()).toEqual(synced);
+    expect((await client.scenario()).incidents).toEqual(synced.incidents);
+    expect((await client.scenario()).events).toEqual(synced.events);
     const proposed = await send(makeCommand('plan.propose', {}));
     expect(proposed.ok && proposed.type === 'plan.propose').toBe(true);
     const afterProposal = await client.scenario();
@@ -81,7 +89,8 @@ describe('deterministic eight-step demo', () => {
     expect(plan.shortfalls.length).toBeGreaterThan(0);
     await send(makeCommand('plan.approve', { planId: plan.id }, afterProposal.revision));
     const approved = await client.scenario();
-    expect(approved.resources.find((r) => r.id === 'pol-42')?.status).toBe('assigned');
+    for (const id of plan.assignments.flatMap((a) => a.resourceIds))
+      expect(approved.resources.find((r) => r.id === id)?.status).toBe('assigned');
     expect(approved.events.some((e) => e.type === 'plan_approved')).toBe(true);
     const repeatApprove = await client.command(makeCommand('plan.approve', { planId: plan.id }));
     expect(!repeatApprove.ok && repeatApprove.error.code).toBe('plan_not_proposed');
@@ -93,7 +102,7 @@ describe('deterministic eight-step demo', () => {
     await client.command(makeCommand('plan.propose', {}));
     const planned = await client.scenario();
     await client.command(
-      makeCommand('zone.set_connectivity', { zoneId: 'zone-c', connectivity: 'offline' })
+      makeCommand('zone.set_connectivity', { zoneId: 'zone-east', connectivity: 'offline' })
     );
     const result = await client.command(
       makeCommand('plan.approve', { planId: planned.plans[0]!.id })
@@ -113,10 +122,45 @@ describe('deterministic eight-step demo', () => {
       makeCommand('report.sync', { reports: [{ ...report, body: '' }] })
     );
     expect(invalid.ok && invalid.type === 'report.sync' && invalid.data.rejected).toHaveLength(1);
-    expect((await client.scenario()).reports).toHaveLength(0);
+    expect((await client.scenario()).reports[0]?.syncState).toBe('rejected');
   });
 });
 describe('HTTP boundary and offline persistence', () => {
+  it('rejects unsupported chief providers and missing revision provenance', async () => {
+    const items = await createMockClient().recommendations();
+    for (const invalid of [
+      items.map((r) => ({ ...r, source: { ...r.source, provider: 'ifm' } })),
+      items.map((r) => ({ ...r, analyzedRevision: undefined }))
+    ]) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: invalid })))
+      );
+      await expect(createHttpClient('').recommendations()).rejects.toThrow(
+        'unsupported provenance/revision'
+      );
+    }
+  });
+  it('does not treat an acknowledged but unapproved plan as execution success', async () => {
+    const client = createMockClient();
+    const proposed = await client.command(makeCommand('plan.propose', {}));
+    if (!proposed.ok || proposed.type !== 'plan.propose')
+      throw new Error('Fixture proposal failed');
+    const command = makeCommand('plan.approve', { planId: proposed.data.plan.id });
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(
+            JSON.stringify({ ...proposed, commandId: command.commandId, type: command.type })
+          )
+        )
+    );
+    await expect(createHttpClient('').command(command)).rejects.toThrow(
+      'approval was not confirmed'
+    );
+  });
   it('never turns a network failure into a mock success', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
     const client = createHttpClient('http://example.test');

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { createClient, makeCommand, ApiError } from './api-client';
-import type { Command, FieldReport, FrontendClient, Recommendation, Scenario } from './contract';
+import type { Command, FieldReport, FrontendClient, Scenario } from './contract';
+import { AdviceRequests, ChiefAdvice, emptyAdvice } from './ChiefAdvice';
 import { readQueue, writeQueue } from './offline-queue';
 import { OperatingMap } from './OperatingMap';
 
@@ -29,7 +30,10 @@ export function App() {
   const [scenario, setScenario] = useState<Scenario | null>(null);
   const stateRef = useRef(scenario);
   stateRef.current = scenario;
-  const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
+  const [advice, setAdvice] = useState(emptyAdvice);
+  const adviceRequests = useRef(new AdviceRequests());
+  const worldRead = useRef(0);
+  const [stateFresh, setStateFresh] = useState(false);
   const [queue, setQueue] = useState<FieldReport[]>([]);
   const [queueReady, setQueueReady] = useState(false);
   const [error, setError] = useState('');
@@ -45,26 +49,40 @@ export function App() {
   const [online, setOnline] = useState(navigator.onLine);
   const [resetOpen, setResetOpen] = useState(false);
   const [lastSync, setLastSync] = useState('');
-  const refresh = useCallback(async (active: FrontendClient) => {
-    const value = await active.scenario();
-    if (client.current !== active) return;
-    setScenario(value);
-    setLastSync(clock(value.simulatedTime));
-    try {
-      const recs = await active.recommendations();
-      if (client.current === active) setRecommendations(recs);
-    } catch (e) {
-      if (client.current === active) {
-        setRecommendations([]);
-        setError(e instanceof Error ? e.message : 'Recommendations unavailable.');
-      }
+  const loadAdvice = useCallback((active: FrontendClient) => {
+    if (active.mode === 'api' && !navigator.onLine) {
+      adviceRequests.current.invalidate();
+      setAdvice({
+        items: [],
+        status: 'error',
+        error:
+          'Cloud reasoning is unavailable while this device is offline. Reports can still be queued locally.'
+      });
+      return;
     }
+    void adviceRequests.current.load(() => active.recommendations(), setAdvice);
   }, []);
+  const refresh = useCallback(
+    async (active: FrontendClient) => {
+      const generation = ++worldRead.current;
+      const value = await active.scenario();
+      if (client.current !== active || generation !== worldRead.current) return;
+      stateRef.current = value;
+      setScenario(value);
+      setStateFresh(true);
+      setLastSync(clock(value.simulatedTime));
+      loadAdvice(active);
+    },
+    [loadAdvice]
+  );
   useEffect(() => {
     const active = createClient(mode);
     client.current = active;
     setScenario(null);
-    setRecommendations([]);
+    adviceRequests.current.invalidate();
+    setAdvice(emptyAdvice);
+    setStateFresh(false);
+    stateRef.current = null;
     setError('');
     setQueueReady(false);
     setSelected('');
@@ -84,23 +102,36 @@ export function App() {
       .finally(() => {
         if (client.current === active) setBusy('');
       });
+    let polling = false;
     const timer = window.setInterval(async () => {
-      if (locked.current || !stateRef.current) return;
+      if (polling || locked.current || !stateRef.current) return;
+      polling = true;
+      const generation = worldRead.current;
       try {
         const next = await active.poll(stateRef.current.revision);
-        if (client.current !== active || locked.current) return;
+        if (client.current !== active || locked.current || generation !== worldRead.current) return;
+        setStateFresh(true);
         if (next) {
+          stateRef.current = next;
           setScenario(next);
           setLastSync(clock(next.simulatedTime));
-          const recs = await active.recommendations();
-          if (client.current === active && !locked.current) setRecommendations(recs);
+          loadAdvice(active);
         }
       } catch (e) {
-        if (client.current === active) setError(e instanceof Error ? e.message : 'Polling failed.');
+        if (client.current === active && generation === worldRead.current) {
+          setStateFresh(false);
+          setError(e instanceof Error ? e.message : 'Polling failed.');
+        }
+      } finally {
+        polling = false;
       }
     }, 3000);
-    return () => clearInterval(timer);
-  }, [mode, refresh]);
+    return () => {
+      clearInterval(timer);
+      adviceRequests.current.invalidate();
+      worldRead.current += 1;
+    };
+  }, [mode, refresh, loadAdvice]);
   useEffect(() => {
     const update = () => setOnline(navigator.onLine);
     window.addEventListener('online', update);
@@ -130,12 +161,16 @@ export function App() {
   async function run(label: string, action: () => Promise<void>) {
     if (locked.current) return;
     locked.current = true;
+    worldRead.current += 1;
+    adviceRequests.current.invalidate();
+    setStateFresh(false);
+    setAdvice(emptyAdvice);
     setBusy(label);
     setError('');
     setNotice('');
     try {
       await action();
-      await refresh(client.current);
+      if (online || mode === 'mock') await refresh(client.current);
       setNotice(`${label} complete${mode === 'mock' ? ' · mock simulation' : ''}.`);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Action failed.');
@@ -144,7 +179,10 @@ export function App() {
       setBusy('');
     }
   }
-  const zone = scenario?.zones.find((z) => z.id === selectedZone) ?? scenario?.zones[2];
+  const zone =
+    scenario?.zones.find((z) => z.id === selectedZone) ??
+    scenario?.zones.find((z) => z.id === 'zone-east') ??
+    scenario?.zones.at(-1);
   const plan = scenario?.plans.find((p) => p.status === 'proposed') ?? scenario?.plans.at(-1);
   const bridge = scenario?.bridges[0];
   const available = scenario?.resources.filter((r) => r.status === 'available').length ?? 0;
@@ -181,6 +219,10 @@ export function App() {
         setEdgeTab('Sync queue');
         return;
       }
+      // It was saved before the request. Retry via sync with the existing ID,
+      // rather than submitting the same text as a new report after a lost ACK.
+      setBody('');
+      setEdgeTab('Sync queue');
       throw e;
     }
   }
@@ -448,7 +490,7 @@ export function App() {
               <section className="panel recommendation-panel" id="recommendations">
                 <Heading
                   title="Resource recommendation"
-                  aside={plan ? `${plan.generatedBy} · ${plan.status}` : 'HUMAN REVIEW'}
+                  aside={plan ? `ENGINE · ${plan.status}` : 'HUMAN REVIEW'}
                 />
                 <div className="plan-content">
                   <div className="plan-summary">
@@ -499,6 +541,8 @@ export function App() {
                       className="primary"
                       disabled={
                         !!busy ||
+                        !stateFresh ||
+                        (mode === 'api' && !online) ||
                         (!!plan &&
                           plan.status === 'proposed' &&
                           plan.basedOnRevision !== scenario.revision)
@@ -562,6 +606,13 @@ export function App() {
                 <details className="chiefs">
                   <summary>
                     Five chiefs · rationale & provenance
+                    {advice.status === 'loading'
+                      ? ' · loading'
+                      : advice.status === 'error'
+                        ? ' · unavailable'
+                        : advice.items.some((r) => r.analyzedRevision !== scenario.revision)
+                          ? ' · stale advice'
+                          : ''}
                     {plan?.shortfalls.length ? ` · ${plan.shortfalls.length} shortfalls` : ''}
                   </summary>
                   {plan?.shortfalls.map((s) => (
@@ -570,29 +621,13 @@ export function App() {
                       {s.missingCapabilities.join(', ')}. {s.reason}
                     </p>
                   ))}
-                  {recommendations.length ? (
-                    recommendations.map(({ recommendation: r, source }) => (
-                      <article key={r.id}>
-                        <strong>
-                          {r.agent.replaceAll('_', ' ')}{' '}
-                          <span className="tag">
-                            {source.provider} · {Math.round(r.confidence * 100)}%
-                          </span>
-                        </strong>
-                        <p>
-                          {r.summary}. {r.action}
-                        </p>
-                        <small>
-                          {source.model} · {r.status}
-                          {source.degraded
-                            ? ` · Degraded: ${source.warning ?? 'provider fallback'}`
-                            : ''}
-                        </small>
-                      </article>
-                    ))
-                  ) : (
-                    <p>Recommendations unavailable. Retry refresh to load provenance.</p>
-                  )}
+                  <ChiefAdvice
+                    advice={advice}
+                    revision={scenario.revision}
+                    online={online}
+                    disabled={!!busy}
+                    onRefresh={() => loadAdvice(client.current)}
+                  />
                 </details>
               </section>
             </div>
@@ -706,8 +741,8 @@ export function App() {
               )}
             </section>
             <section className="panel simulation-panel">
-              <Heading title="Simulation controller" aside="DEMO" />
-              <p>Trigger disasters and network failures.</p>
+              <Heading title="Simulation controller" aside="DETERMINISTIC" />
+              <p>Scripted disasters and network failures · TypeScript engine.</p>
               <div className="simulation-buttons">
                 <button
                   className="flood-control"
@@ -717,7 +752,9 @@ export function App() {
                       'Flash flood',
                       makeCommand('scenario.trigger_flood', {
                         intensity: 'severe',
-                        zoneIds: scenario.zones[1] ? [scenario.zones[1].id] : []
+                        zoneIds: scenario.zones
+                          .filter((z) => z.id === 'zone-oakland')
+                          .map((z) => z.id)
                       })
                     )
                   }
@@ -798,7 +835,10 @@ export function App() {
               </div>
             </section>
             <section className="panel logs-panel" id="communications">
-              <Heading title="Communications & logs" aside={`${scenario.events.length} EVENTS`} />
+              <Heading
+                title="Communications & logs"
+                aside={`${scenario.events.length} ENGINE EVENTS`}
+              />
               <div className="tabs" aria-label="Event filters">
                 {['Global log', 'Selected zone', 'System'].map((t) => (
                   <button key={t} aria-pressed={logTab === t} onClick={() => setLogTab(t)}>

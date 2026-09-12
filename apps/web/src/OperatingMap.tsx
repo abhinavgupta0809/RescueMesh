@@ -20,6 +20,9 @@ export function OperatingMap({
   const [zoom, setZoom] = useState(1);
   const [layers, setLayers] = useState({ facilities: true, incidents: true, routes: true });
   const entities = [...scenario.facilities, ...scenario.incidents];
+  const downtown = scenario.zones.find((z) => z.id === 'zone-downtown');
+  const oakland = scenario.zones.find((z) => z.id === 'zone-oakland');
+  const east = scenario.zones.find((z) => z.id === 'zone-east');
   return (
     <div className="map-canvas">
       <div className="map-layers" aria-label="Map layers">
@@ -74,18 +77,18 @@ export function OperatingMap({
           <g className="map-zones">
             <path
               d="M 66 128 L 212 88 L 281 193 L 214 307 L 104 284 Z"
-              fill={scenario.zones[0]?.connectivity === 'offline' ? '#772e3b' : '#16654e'}
-              stroke={scenario.zones[0]?.connectivity === 'offline' ? '#ff6070' : '#36c78b'}
+              fill={downtown?.connectivity === 'offline' ? '#772e3b' : '#16654e'}
+              stroke={downtown?.connectivity === 'offline' ? '#ff6070' : '#36c78b'}
             />
             <path
               d="M 337 174 L 427 126 L 490 251 L 423 368 L 288 295 Z"
-              fill={scenario.zones[1]?.connectivity === 'offline' ? '#772e3b' : '#705729'}
-              stroke={scenario.zones[1]?.connectivity === 'offline' ? '#ff6070' : '#d3ac54'}
+              fill={oakland?.connectivity === 'offline' ? '#772e3b' : '#705729'}
+              stroke={oakland?.connectivity === 'offline' ? '#ff6070' : '#d3ac54'}
             />
             <path
               d="M 472 298 L 645 266 L 696 390 L 614 522 L 460 463 Z"
-              fill={scenario.zones[2]?.connectivity === 'offline' ? '#772e3b' : '#254b5c'}
-              stroke={scenario.zones[2]?.connectivity === 'offline' ? '#ff6070' : '#4ba5d1'}
+              fill={east?.connectivity === 'offline' ? '#772e3b' : '#254b5c'}
+              stroke={east?.connectivity === 'offline' ? '#ff6070' : '#4ba5d1'}
             />
           </g>
           <g className="geographic-labels">
@@ -118,25 +121,25 @@ export function OperatingMap({
                 Downtown
               </tspan>
               <tspan x="165" dy="18" className="zone-state">
-                {scenario.zones[0]?.connectivity}
+                {downtown?.connectivity}
               </tspan>
             </text>
             <text x="387" y="263">
-              Zone B
+              Zone C
               <tspan x="387" dy="20">
                 Oakland
               </tspan>
               <tspan x="387" dy="18" className="zone-state">
-                {scenario.zones[1]?.connectivity}
+                {oakland?.connectivity}
               </tspan>
             </text>
             <text x="568" y="411">
-              Zone C
+              Zone E
               <tspan x="568" dy="20">
                 East End
               </tspan>
               <tspan x="568" dy="18" className="zone-state">
-                {scenario.zones[2]?.connectivity}
+                {east?.connectivity}
               </tspan>
             </text>
           </g>
