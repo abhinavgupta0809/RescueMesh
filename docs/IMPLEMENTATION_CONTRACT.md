@@ -105,16 +105,16 @@ interface CommandEnvelope<TType, TPayload> {
 
 ### 3.1 Transition table
 
-| Command                  | Preconditions                                                                    | Effect                                                                                                       | Events                                                  |
-| ------------------------ | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
-| `scenario.trigger_flood` | `zoneIds` exist (absent means all zones)                                         | Raises synthetic incidents in the named zones, sets `status: 'active'`, may downgrade route status to `slow` | `flood_triggered`, one `incident_reported` per incident |
-| `route.close_bridge`     | `bridgeId` exists; `closed` differs from current status                          | Sets the bridge status and forces every route in `routeIds` to `closed` (reopen restores `open`)             | `bridge_closed`, one `road_changed` per route           |
-| `zone.set_connectivity`  | `zoneId` exists                                                                  | Sets `connectivity` and `connectivityChangedAt`                                                              | `zone_connectivity_changed`                             |
-| `report.submit`          | `zoneId` exists; `body` is 1–4000 chars                                          | Zone `offline` → reject with `zone_offline` so the device queues. Otherwise store as `pending`, then apply   | `report_queued` or `report_applied`                     |
-| `report.sync`            | Every `zoneId` exists                                                            | Applies each report in order, skipping any `clientReportId` already applied                                  | one `report_applied` per newly applied report           |
-| `plan.propose`           | At least one active incident; at least one available unit                        | Builds a `proposed` plan, marks any previously `proposed` plan `superseded`. Reserves nothing                | `plan_proposed`                                         |
-| `plan.approve`           | Plan exists and is `proposed`; `basedOnRevision` still current; no unit conflict | Sets plan `approved`, assignments `approved`, resources `assigned`                                           | `plan_approved`, one `resource_dispatched` per unit     |
-| `scenario.reset`         | none                                                                             | Replaces all state with a fresh clone of the seed; `revision` returns to `0`; clears the server report log   | `scenario_reset`                                        |
+| Command                  | Preconditions                                                                    | Effect                                                                                                           | Events                                                  |
+| ------------------------ | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `scenario.trigger_flood` | `zoneIds` exist (absent means all zones)                                         | Raises synthetic incidents in the named zones, sets `status: 'active'`, may downgrade route status to `slow`     | `flood_triggered`, one `incident_reported` per incident |
+| `route.close_bridge`     | `bridgeId` exists; `closed` differs from current status                          | Sets the bridge status and forces every route in `routeIds` to `closed` (reopen restores `open`)                 | `bridge_closed`, one `road_changed` per route           |
+| `zone.set_connectivity`  | `zoneId` exists                                                                  | Sets `connectivity` and `connectivityChangedAt`                                                                  | `zone_connectivity_changed`                             |
+| `report.submit`          | `zoneId` exists; `body` is 1–4000 chars                                          | Zone `offline` → store as `queued`, raising **no** incident (`queuedOffline: true`). Otherwise apply immediately | `report_queued` or `report_applied`                     |
+| `report.sync`            | Every `zoneId` exists                                                            | Applies each report in order, skipping any `clientReportId` already applied                                      | one `report_applied` per newly applied report           |
+| `plan.propose`           | At least one active incident; at least one available unit                        | Builds a `proposed` plan, marks any previously `proposed` plan `superseded`. Reserves nothing                    | `plan_proposed`                                         |
+| `plan.approve`           | Plan exists and is `proposed`; `basedOnRevision` still current; no unit conflict | Sets plan `approved`, assignments `approved`, resources `assigned`                                               | `plan_approved`, one `resource_dispatched` per unit     |
+| `scenario.reset`         | none                                                                             | Replaces all state with a fresh clone of the seed; `revision` returns to `0`; clears the server report log       | `scenario_reset`                                        |
 
 ### 3.2 Response shapes
 
@@ -192,25 +192,27 @@ External services stay optional. Absent credentials must never break the demo: t
 
 Executable as `checkInvariants(scenario): InvariantViolation[]`, which must return `[]` after every command. `assertInvariants(scenario)` throws with all violations listed.
 
-| Id  | Invariant                                                                                                                                 |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| I1  | Exactly 3 hospitals, at least 3 fire houses, exactly 2 police hubs, exactly 2 rescue centers                                              |
-| I2  | No unit is held by more than one active (`approved` or `dispatched`) assignment                                                           |
-| I3  | A held unit is not `available`; a unit marked `assigned` holds exactly one active assignment                                              |
-| I4  | Every referenced incident, resource, and facility id exists — in assignments and in plans                                                 |
-| I5  | No active assignment routes a unit over a `closed` route                                                                                  |
-| I6  | A `closed` bridge implies every route in its `routeIds` is `closed`                                                                       |
-| I7  | Every facility belongs to exactly one zone; every incident to at most one                                                                 |
-| I8  | `clientReportId` is unique; `applied` reports have `appliedAt`; only `applied` reports name an incident; `rejected` reports have a reason |
-| I9  | At most one plan is `proposed` at a time                                                                                                  |
-| I10 | A `proposed` plan holds only `proposed` assignments; an `approved` plan holds none                                                        |
-| I11 | Every route, bridge, and impact forecast is flagged `synthetic`                                                                           |
-| I12 | `revision` is a non-negative integer; event revisions never decrease or exceed it                                                         |
+| Id  | Invariant                                                                                                                                                                |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| I1  | Exactly 3 hospitals, at least 3 fire houses, exactly 2 police hubs, exactly 2 rescue centers                                                                             |
+| I2  | No unit is held by more than one active (`approved` or `dispatched`) assignment                                                                                          |
+| I3  | A held unit is not `available`; a unit marked `assigned` holds exactly one active assignment                                                                             |
+| I4  | Every referenced incident, resource, and facility id exists — in assignments and in plans                                                                                |
+| I5  | No **proposed** plan routes a unit over a `closed` route. An already-dispatched unit stranded by a later closure is a valid state the exercise surfaces, not a violation |
+| I6  | A `closed` bridge implies every route in its `routeIds` is `closed`                                                                                                      |
+| I7  | Every facility belongs to exactly one zone; every incident to at most one                                                                                                |
+| I8  | `clientReportId` is unique; `applied` reports have `appliedAt`; only `applied` reports name an incident; `rejected` reports have a reason                                |
+| I9  | At most one plan is `proposed` at a time                                                                                                                                 |
+| I10 | A `proposed` plan holds only `proposed` assignments; an `approved` plan holds none                                                                                       |
+| I11 | Every route, bridge, and impact forecast is flagged `synthetic`                                                                                                          |
+| I12 | `revision` is a non-negative integer; event revisions never decrease or exceed it                                                                                        |
+| I13 | Modeled capacities stay in bounds: `0 <= currentLoad <= syntheticCapacity`, with non-negative crew and people-at-risk                                                    |
 
-Two properties are behavioural rather than structural, so they are asserted by tests rather than by `checkInvariants`:
+Three properties are behavioural rather than structural, so they are asserted by tests rather than by `checkInvariants`:
 
 - **Exactly-once sync.** Replaying `report.sync` with the same `clientReportId` set adds no incidents and no events, and returns those reports as `duplicates`.
-- **Reset fidelity.** After `scenario.reset`, the state deep-equals the seed and `revision` is `0`.
+- **Reset fidelity.** After `scenario.reset`, the state deep-equals the seed, `revision` is `0`, and every ledger — queued reports, generated events, and command deduplication — is cleared.
+- **Command idempotency.** Replaying any `commandId` returns the original result with `duplicate: true`, appends no events, and leaves the revision unchanged.
 
 ## 7. Ownership
 
