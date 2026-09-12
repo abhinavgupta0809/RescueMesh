@@ -125,9 +125,9 @@ export interface GeminiConfig {
 /** Defaults for the Gemini generateContent API. */
 export const GEMINI_DEFAULTS = {
   baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-  model: 'gemini-2.0-flash',
+  model: 'gemini-3.6-flash',
   timeoutMs: 20_000,
-  maxOutputTokens: 1_024,
+  maxOutputTokens: 4_096,
   temperature: 0.2
 } as const;
 

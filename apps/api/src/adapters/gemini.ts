@@ -97,6 +97,15 @@ export class GeminiClient {
     }
     const text = readCandidateText(payload);
     if (!text) throw new GeminiError('shape', 'Gemini response contained no candidate text');
+    // A reply cut off at the cap looks like malformed JSON downstream; say what
+    // actually happened so the fix is obvious.
+    if (readFinishReason(payload) === 'MAX_TOKENS') {
+      throw new GeminiError(
+        'shape',
+        `Gemini reply hit the ${this.config.maxOutputTokens}-token output cap before finishing its JSON`,
+        'Raise GEMINI_MAX_OUTPUT_TOKENS in .env.'
+      );
+    }
     return text;
   }
 }
@@ -121,6 +130,16 @@ const readCandidateText = (payload: unknown): string | undefined => {
     .filter((value): value is string => typeof value === 'string')
     .join('');
   return text.trim() ? text : undefined;
+};
+
+const readFinishReason = (payload: unknown): string | undefined => {
+  if (typeof payload !== 'object' || payload === null) return undefined;
+  const candidates = (payload as { candidates?: unknown }).candidates;
+  if (!Array.isArray(candidates)) return undefined;
+  const first: unknown = candidates[0];
+  if (typeof first !== 'object' || first === null) return undefined;
+  const reason = (first as { finishReason?: unknown }).finishReason;
+  return typeof reason === 'string' ? reason : undefined;
 };
 
 const readBlockReason = (payload: unknown): string | undefined => {
