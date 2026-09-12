@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "ifm:check": "tsx src/scripts/check-ifm.ts",
-    "k2": "tsx src/scripts/k2.ts"
+    "k2": "tsx src/scripts/k2.ts",
+    "gemini:check": "tsx src/scripts/check-gemini.ts"
   },
   "dependencies": {
     "@rescuemesh/shared": "*",
