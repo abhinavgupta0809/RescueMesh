@@ -45,7 +45,11 @@ export interface DeliberationLimits {
    * Only transient failures (429/503/500/timeout) are retried; a bad key is not.
    */
   maxRetries: number;
-  /** Backoff before the single retry. */
+  /**
+   * Backoff before the single retry, applied ONLY to rate-limit-shaped
+   * failures (429/503/500). A timeout has already spent its wait, so retrying
+   * it immediately is both faster and no less polite to the provider.
+   */
   retryBackoffMs: number;
 }
 
@@ -95,7 +99,12 @@ const now = () => new Date().toISOString();
  *
  * A failing chief is substituted from the recorded fixture rather than failing
  * the session; the substitution is named and the session ends `degraded`.
- * There is no retry loop: each call gets one attempt.
+ * Retry policy: a transient failure (503/500, or a 429 whose retryDelay is
+ * short) may receive at most ONE bounded retry. A daily-quota exhaustion is
+ * never retried — it cannot succeed, and on a metered tier it would spend
+ * requests the demo still needs. The first daily-quota 429 opens a
+ * per-session circuit breaker so every remaining call is skipped and filled
+ * from the recorded fixture.
  */
 export class DeliberationOrchestrator {
   private readonly sessions = new Map<string, DeliberationSession>();
@@ -265,7 +274,10 @@ export class DeliberationOrchestrator {
     for (let attempt = 0; attempt <= this.limits.maxRetries; attempt += 1) {
       if (attempt > 0) {
         if (!isRetryableGeminiFailure(lastError)) break;
-        await new Promise((resolve) => setTimeout(resolve, this.limits.retryBackoffMs));
+        const alreadyWaited = lastError instanceof GeminiError && lastError.stage === 'timeout';
+        if (!alreadyWaited) {
+          await new Promise((resolve) => setTimeout(resolve, this.limits.retryBackoffMs));
+        }
       }
       try {
         return await this.attemptCall(sessionId, stage, prompt);
