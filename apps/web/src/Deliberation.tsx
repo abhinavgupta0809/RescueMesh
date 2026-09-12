@@ -1,7 +1,13 @@
-import { type DeliberationSession } from '@rescuemesh/shared';
+import {
+  type DeliberationSession,
+  type DisasterSpecification,
+  type Scenario
+} from '@rescuemesh/shared';
 import { CHIEF_ROLES } from './deliberation-contract';
 import { FIXTURE_MODEL } from './deliberation-fixture';
 import { STALE_MESSAGE, isDeliberating, type DeliberationView } from './deliberation-runner';
+import { ExerciseBuilder } from './ExerciseBuilder';
+import { DisasterBadge } from './disaster-ui';
 import './deliberation.css';
 
 export const roleName = (role: string) =>
@@ -9,13 +15,13 @@ export const roleName = (role: string) =>
     .split('_')
     .map((word) => word[0]!.toUpperCase() + word.slice(1))
     .join(' ');
-const stages = [
-  'Disaster triggered',
-  'Chiefs analyzing',
-  'Cross-review underway',
-  'Incident Commander synthesizing',
-  'Engine validating',
-  'Final plan ready'
+const stages = (scripted: boolean) => [
+  'Deterministic scenario',
+  scripted ? 'Scripted deliberation' : 'Gemini deliberation',
+  'Cross-review',
+  'Incident Commander synthesis',
+  'Engine-validated plan',
+  'Human approval required'
 ];
 function Statements({ title, items }: { title: string; items: string[] }) {
   return (
@@ -76,20 +82,29 @@ function Provenance({
 
 export function Deliberation({
   view,
+  scenario,
+  disasters,
+  acknowledgedDisasters,
   disabled,
   online,
+  onDisastersChange,
   onSimulate,
   onResume
 }: {
   view: DeliberationView;
+  scenario: Scenario;
+  disasters: DisasterSpecification[];
+  acknowledgedDisasters: DisasterSpecification[];
   disabled: boolean;
   online: boolean;
+  onDisastersChange: (disasters: DisasterSpecification[]) => void;
   onSimulate: () => void;
   onResume: () => void;
 }) {
   const s = view.session;
   const stale = view.stale || s?.status === 'stale';
   const active = isDeliberating(view);
+  const stageLabels = stages(s?.source.provider === 'scripted');
   const stage = !s
     ? -1
     : view.phase === 'done' && !stale && s.planId
@@ -101,23 +116,27 @@ export function Deliberation({
           );
   return (
     <section className="panel deliberation-panel" aria-labelledby="deliberation-title">
-      <header className="panel-heading">
+      <header className="panel-heading deliberation-heading">
         <div>
           <h2 id="deliberation-title">Five-chief deliberation</h2>
-          <small>Public advisory statements · deterministic engine remains in control</small>
+          <small>
+            Gemini deliberation in API mode · scripted deliberation in local mock · deterministic
+            engine remains in control
+          </small>
         </div>
-        <button
-          className="primary"
-          disabled={disabled || active || view.phase === 'error' || !online}
-          onClick={onSimulate}
-        >
-          {active ? 'Simulating…' : 'Simulate'}
-        </button>
       </header>
+      <ExerciseBuilder
+        scenario={scenario}
+        disasters={disasters}
+        disabled={disabled || active || view.phase === 'error' || !online}
+        starting={active}
+        onChange={onDisastersChange}
+        onSubmit={onSimulate}
+      />
       <p className="deliberation-intro">
-        Simulate triggers the recorded flood step, then asks the five chiefs to deliberate on one
-        frozen revision. AI advice does not dispatch units. Review the separate engine-validated
-        resource plan and select Approve Plan.
+        Simulate submits one atomic synthetic exercise. The engine creates all selected incidents,
+        freezes one revision, then the five chiefs deliberate. Review the separate engine-validated
+        plan; human approval is required before assignments change.
       </p>
       {!online && (
         <p className="amber">
@@ -133,7 +152,7 @@ export function Deliberation({
             : view.error
               ? 'Deliberation needs attention. No execution confirmed.'
               : s
-                ? `${stages[Math.max(stage, 0)]}${s.status === 'degraded' ? ' · Scripted fallback contributions' : ''}`
+                ? `${stageLabels[Math.max(stage, 0)]}${s.status === 'degraded' ? ' · Scripted fallback contributions' : ''}`
                 : 'Ready to simulate. No cloud request is made until you ask for advice.'}
       </div>
       {view.error && !stale && (
@@ -150,12 +169,21 @@ export function Deliberation({
       )}
       {s && (
         <>
-          <p className="green">
-            Deterministic disaster triggered · Scripted simulation event · {s.disaster} · revision{' '}
-            {s.scenarioRevision}
-          </p>
+          <div className="acknowledged-exercise">
+            <strong>Deterministic scenario created · revision {s.scenarioRevision}</strong>
+            <span>Synthetic exercise</span>
+            <div>
+              {acknowledgedDisasters.map((disaster, index) => (
+                <DisasterBadge
+                  disaster={disaster}
+                  zones={scenario.zones}
+                  key={`${disaster.kind}-${disaster.zoneId}-${index}`}
+                />
+              ))}
+            </div>
+          </div>
           <ol className="deliberation-stages" aria-label="Deliberation timeline">
-            {stages.map((label, index) => (
+            {stageLabels.map((label, index) => (
               <li
                 key={label}
                 aria-current={stage === index ? 'step' : undefined}
@@ -229,7 +257,7 @@ export function Deliberation({
             })}
           </div>
           <section className="deliberation-debate" aria-labelledby="debate-title">
-            <h3 id="debate-title">Debate</h3>
+            <h3 id="debate-title">Cross-review</h3>
             {s.crossReview.length ? (
               s.crossReview.map((r) => (
                 <div className="debate-row" key={r.role}>
@@ -259,7 +287,7 @@ export function Deliberation({
           </section>
           <section className="commander-synthesis" aria-labelledby="synthesis-title">
             <h3 id="synthesis-title">
-              Commander synthesis <span className="muted">· final advisory brief</span>
+              Incident Commander synthesis <span className="muted">· final advisory brief</span>
             </h3>
             {s.finalBrief ? (
               <>
@@ -288,7 +316,7 @@ export function Deliberation({
             )}
           </section>
           <div className="engine-plan-boundary">
-            <strong>Engine-validated plan · separate from AI advice</strong>
+            <strong>Engine-validated plan · human approval required</strong>
             <p>
               The engine independently allocates resources from scenario state. Chief prose is not
               executed.

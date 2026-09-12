@@ -1,12 +1,13 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DeliberationSession } from '@rescuemesh/shared';
+import { pittsburghFloodScenario, type DeliberationSession } from '@rescuemesh/shared';
 import { createHttpClient, makeCommand } from './api-client';
 import { createMockClient } from './mock-client';
 import { Deliberation } from './Deliberation';
 import { CHIEF_ROLES, readSession } from './deliberation-contract';
 import { fixtureBrief, fixturePosition, fixtureResponse } from './deliberation-fixture';
+import { defaultExercise } from './ExerciseBuilder';
 import {
   DeliberationRunner,
   emptyDeliberation,
@@ -41,8 +42,12 @@ const render = (v: DeliberationView, online = true) =>
   renderToStaticMarkup(
     createElement(Deliberation, {
       view: v,
+      scenario: pittsburghFloodScenario,
+      disasters: defaultExercise(),
+      acknowledgedDisasters: v.session ? defaultExercise() : [],
       disabled: false,
       online,
+      onDisastersChange: () => {},
       onSimulate: () => {},
       onResume: () => {}
     })
@@ -74,12 +79,12 @@ describe('public deliberation presentation', () => {
       expect(html.match(/class="chief-position"/g)).toHaveLength(5);
       expect(html.match(/aria-current="step"/g)).toHaveLength(1);
       for (const label of [
-        'Disaster triggered',
-        'Chiefs analyzing',
-        'Cross-review underway',
-        'Incident Commander synthesizing',
-        'Engine validating',
-        'Final plan ready'
+        'Deterministic scenario',
+        'Gemini deliberation',
+        'Cross-review',
+        'Incident Commander synthesis',
+        'Engine-validated plan',
+        'Human approval required'
       ])
         expect(html).toContain(label);
       expect(html).toContain('Approval is disabled');

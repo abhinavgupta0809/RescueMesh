@@ -1,4 +1,5 @@
 import type { AgentRole } from './types.js';
+import type { DisasterSpecification } from './disaster.js';
 import type { ScenarioStepName } from './scripted-scenario.js';
 
 /**
@@ -289,6 +290,8 @@ export const validateFinalBrief = (raw: unknown): ArtefactValidation<FinalOperat
 export interface StartSimulationRequest {
   /** A scripted step to advance, or omit to deliberate on current state. */
   step?: ScenarioStepName;
+  /** One or two operator-selected disasters, applied atomically before deliberation. */
+  disasters?: DisasterSpecification[];
   /** Idempotency key: the same value returns the existing session. */
   requestId?: string;
 }

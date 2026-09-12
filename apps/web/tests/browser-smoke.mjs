@@ -30,31 +30,23 @@ try {
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
     await page.goto(origin);
-    await page.getByRole('button', { name: 'Trigger Flash Flood', exact: false }).waitFor();
+    await page.getByRole('form', { name: 'Synthetic exercise builder' }).waitFor();
     await page.screenshot({ path: `${output}/${name}-overview.png`, fullPage: true });
     assert.equal(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
       true,
       `${name}: no horizontal overflow`
     );
-    await page.getByRole('button', { name: 'Trigger Flash Flood', exact: false }).click();
-    await page.getByRole('button', { name: 'Close a Bridge', exact: false }).click();
-    await page.getByRole('button', { name: 'Disconnect Zone', exact: false }).click();
-    await page
-      .getByLabel('Report an incident', { exact: false })
-      .fill('Synthetic field report: evacuation assistance needed at the school.');
-    await page.getByRole('button', { name: 'Queue report', exact: false }).click();
-    await page
-      .getByText('Synthetic field report: evacuation assistance needed at the school.', {
-        exact: true
-      })
-      .first()
-      .waitFor();
-    await page.getByRole('button', { name: 'Reconnect Network', exact: false }).click();
+    assert.equal(await page.getByLabel('Disaster 1 type').inputValue(), 'flash_flood');
+    assert.equal(await page.getByLabel('Disaster 1 zone').inputValue(), 'zone-oakland');
+    await page.getByRole('button', { name: 'Add second disaster', exact: true }).click();
+    await page.getByLabel('Disaster 1 zone').selectOption('zone-downtown');
+    await page.getByLabel('Disaster 2 type').selectOption('structural_fire');
+    await page.getByLabel('Disaster 2 zone').selectOption('zone-oakland');
     const simulate = page.getByRole('button', { name: 'Simulate', exact: true });
     await simulate.click();
     assert.equal(
-      await page.getByRole('button', { name: 'Simulating…', exact: true }).isDisabled(),
+      await page.getByRole('button', { name: 'Starting…', exact: true }).isDisabled(),
       true
     );
     const planAction = page.locator('.plan-actions .primary');
@@ -63,6 +55,14 @@ try {
     await page.waitForFunction(() => !document.querySelector('.plan-actions .primary')?.disabled);
     assert.equal(await page.locator('.chief-position').count(), 5);
     assert.equal(await page.locator('.debate-row').count(), 5);
+    assert.equal(
+      (await page.getByText('Flash flood · Downtown / Uptown / Strip').count()) > 0,
+      true
+    );
+    assert.equal(
+      (await page.getByText('Structural fire · Oakland / Bates Street').count()) > 0,
+      true
+    );
     assert.equal(
       await page
         .locator('.deliberation-provenance strong')
@@ -91,6 +91,19 @@ try {
       .getByText('Plan approval complete · mock simulation.', { exact: true })
       .first()
       .waitFor();
+    await page.getByRole('button', { name: 'Close a Bridge', exact: false }).click();
+    await page.getByRole('button', { name: 'Disconnect Zone', exact: false }).click();
+    await page
+      .getByLabel('Report an incident', { exact: false })
+      .fill('Synthetic field report: evacuation assistance needed at the school.');
+    await page.getByRole('button', { name: 'Queue report', exact: false }).click();
+    await page
+      .getByText('Synthetic field report: evacuation assistance needed at the school.', {
+        exact: true
+      })
+      .first()
+      .waitFor();
+    await page.getByRole('button', { name: 'Reconnect Network', exact: false }).click();
     // Reset while a second session is running, then ensure late results cannot return.
     await page.getByRole('button', { name: 'Simulate', exact: true }).click();
     await page.getByRole('button', { name: 'Reset Simulation', exact: false }).click();
@@ -100,6 +113,14 @@ try {
       .first()
       .waitFor();
     assert.equal(await page.locator('.chief-position').count(), 0);
+    assert.equal(await page.getByLabel('Disaster 1 type').inputValue(), 'flash_flood');
+    assert.equal(await page.getByLabel('Disaster 1 zone').inputValue(), 'zone-oakland');
+    assert.equal(await page.getByLabel('Disaster 2 type').count(), 0);
+    await page.getByRole('button', { name: 'Add second disaster', exact: true }).click();
+    await page.getByLabel('Disaster 1 type').selectOption('multi_vehicle_collision');
+    await page.getByLabel('Disaster 1 zone').selectOption('zone-east');
+    await page.getByLabel('Disaster 2 type').selectOption('structural_fire');
+    await page.getByLabel('Disaster 2 zone').selectOption('zone-east');
     await page.getByRole('button', { name: 'Simulate', exact: true }).click();
     await page.getByRole('button', { name: 'Close a Bridge', exact: false }).click();
     await page

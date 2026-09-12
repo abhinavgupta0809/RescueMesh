@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import type { DisasterSpecification } from '@rescuemesh/shared';
 import { createClient, makeCommand, ApiError } from './api-client';
 import { planProvenanceLabel } from './contract';
 import type { Command, FieldReport, FrontendClient, Scenario } from './contract';
@@ -7,6 +8,15 @@ import { AdviceRequests, ChiefAdvice, emptyAdvice, type ApprovalOutcomes } from 
 import { readQueue, writeQueue } from './offline-queue';
 import { OperatingMap } from './OperatingMap';
 import { Deliberation } from './Deliberation';
+import { defaultExercise } from './ExerciseBuilder';
+import {
+  DISASTER_PRESENTATION,
+  DisasterBadge,
+  DisasterIcon,
+  disasterKindForIncident,
+  humanizeZoneIds,
+  zoneForIncident
+} from './disaster-ui';
 import {
   DeliberationRunner,
   canApproveSession,
@@ -40,6 +50,8 @@ export function App() {
   stateRef.current = scenario;
   const [advice, setAdvice] = useState(emptyAdvice);
   const [deliberation, setDeliberation] = useState(emptyDeliberation);
+  const [disasters, setDisasters] = useState<DisasterSpecification[]>(defaultExercise);
+  const [submittedDisasters, setSubmittedDisasters] = useState<DisasterSpecification[]>([]);
   const runner = useRef<DeliberationRunner | null>(null);
   runner.current ??= new DeliberationRunner(setDeliberation);
   const [approvals, setApprovals] = useState<ApprovalOutcomes>({});
@@ -128,6 +140,8 @@ export function App() {
     const active = createClient(mode);
     client.current = active;
     runner.current!.reset();
+    setDisasters(defaultExercise());
+    setSubmittedDisasters([]);
     setScenario(null);
     adviceRequests.current.invalidate();
     setAdvice(emptyAdvice);
@@ -254,7 +268,9 @@ export function App() {
     adviceRequests.current.invalidate();
     setAdvice(emptyAdvice);
     const active = client.current;
-    void runner.current!.start(active, { step: 'initial_flooding' }, () => refresh(active));
+    const exercise = disasters.map((disaster) => ({ ...disaster }));
+    setSubmittedDisasters(exercise);
+    void runner.current!.start(active, { disasters: exercise }, () => refresh(active));
   }
   const bridge = scenario?.bridges[0];
   const available = scenario?.resources.filter((r) => r.status === 'available').length ?? 0;
@@ -480,7 +496,12 @@ export function App() {
             </aside>
             <section className="panel map-panel">
               <Heading title="Pittsburgh · Operating map" aside="SCHEMATIC" />
-              <OperatingMap scenario={scenario} selected={selected} onSelect={setSelected} />
+              <OperatingMap
+                scenario={scenario}
+                selected={selected}
+                activeDisasters={deliberation.session ? submittedDisasters : []}
+                onSelect={setSelected}
+              />
               <div className="map-detail" aria-live="polite">
                 {detail ? (
                   <>
@@ -506,22 +527,38 @@ export function App() {
               <section className="panel incident-panel" id="incidents">
                 <Heading title="Active incidents" aside={`${scenario.incidents.length} TOTAL`} />
                 <div className="incident-list">
-                  {scenario.incidents.map((incident, i) => (
-                    <button
-                      className={`incident-row ${selected === incident.id ? 'selected' : ''}`}
-                      key={incident.id}
-                      onClick={() => setSelected(incident.id)}
-                    >
-                      <span className={`incident-number ${incident.severity}`}>
-                        {String(i + 1).padStart(2, '0')}
-                      </span>
-                      <span className="incident-copy">
-                        <strong>{incident.title}</strong>
-                        <small>{incident.address}</small>
-                      </span>
-                      <span className={`tag ${incident.severity}`}>{incident.severity}</span>
-                    </button>
-                  ))}
+                  {scenario.incidents.map((incident, i) => {
+                    const disasterKind = disasterKindForIncident(incident);
+                    const incidentZone = zoneForIncident(incident.id, scenario.zones);
+                    return (
+                      <button
+                        className={`incident-row ${disasterKind ? DISASTER_PRESENTATION[disasterKind].tone : ''} ${selected === incident.id ? 'selected' : ''}`}
+                        key={incident.id}
+                        onClick={() => setSelected(incident.id)}
+                      >
+                        <span className={`incident-number ${incident.severity}`}>
+                          {disasterKind ? (
+                            <DisasterIcon kind={disasterKind} />
+                          ) : (
+                            String(i + 1).padStart(2, '0')
+                          )}
+                        </span>
+                        <span className="incident-copy">
+                          <strong>{incident.title}</strong>
+                          <small>{incident.address}</small>
+                          {disasterKind && (
+                            <small
+                              className={`incident-disaster ${DISASTER_PRESENTATION[disasterKind].tone}`}
+                            >
+                              {DISASTER_PRESENTATION[disasterKind].label} ·{' '}
+                              {incidentZone?.name ?? 'Modeled zone'}
+                            </small>
+                          )}
+                        </span>
+                        <span className={`tag ${incident.severity}`}>{incident.severity}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               </section>
               <section className="panel resource-panel" id="assets">
@@ -570,6 +607,20 @@ export function App() {
                     AI-generated
                   </p>
                 )}
+                {plan && deliberation.session && submittedDisasters.length > 0 && (
+                  <div className="plan-exercise-context" aria-label="Final plan exercise context">
+                    <strong>Synthetic exercise context</strong>
+                    <div>
+                      {submittedDisasters.map((disaster, index) => (
+                        <DisasterBadge
+                          disaster={disaster}
+                          zones={scenario.zones}
+                          key={`${disaster.kind}-${disaster.zoneId}-${index}`}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="plan-content">
                   <div className="plan-summary">
                     {plan ? (
@@ -615,6 +666,7 @@ export function App() {
                     )}
                   </div>
                   <div className="plan-actions">
+                    {plan?.status === 'proposed' && <small>Human approval required</small>}
                     <button
                       className="primary"
                       disabled={
@@ -717,8 +769,12 @@ export function App() {
           </div>
           <Deliberation
             view={deliberation}
+            scenario={scenario}
+            disasters={disasters}
+            acknowledgedDisasters={deliberation.session ? submittedDisasters : []}
             disabled={!!busy || !!approving}
             online={online || mode === 'mock'}
+            onDisastersChange={setDisasters}
             onSimulate={simulate}
             onResume={() => void runner.current!.resume()}
           />
@@ -832,28 +888,8 @@ export function App() {
             </section>
             <section className="panel simulation-panel">
               <Heading title="Simulation controller" aside="DETERMINISTIC" />
-              <p>Scripted disasters and network failures · TypeScript engine.</p>
+              <p>Network, report and reset controls · TypeScript engine.</p>
               <div className="simulation-buttons">
-                <button
-                  className="flood-control"
-                  disabled={!!busy}
-                  onClick={() =>
-                    act(
-                      'Flash flood',
-                      makeCommand('scenario.trigger_flood', {
-                        intensity: 'severe',
-                        zoneIds: scenario.zones
-                          .filter((z) => z.id === 'zone-oakland')
-                          .map((z) => z.id)
-                      })
-                    )
-                  }
-                >
-                  <b>1</b>
-                  <span>
-                    Trigger Flash Flood<small>Raise synthetic incidents in Oakland</small>
-                  </span>
-                </button>
                 <button
                   className="bridge-control"
                   disabled={!!busy || !bridge || bridge.status === 'closed'}
@@ -865,7 +901,7 @@ export function App() {
                     )
                   }
                 >
-                  <b>2</b>
+                  <b>1</b>
                   <span>
                     {bridge?.status === 'closed' ? 'Bridge Closed' : 'Close a Bridge'}
                     <small>{bridge?.name ?? 'No bridge configured'}</small>
@@ -884,7 +920,7 @@ export function App() {
                     )
                   }
                 >
-                  <b>3</b>
+                  <b>2</b>
                   <span>
                     Disconnect Zone<small>{zone?.name} · simulate network failure</small>
                   </span>
@@ -898,7 +934,7 @@ export function App() {
                     requestAnimationFrame(() => document.getElementById('report')?.focus());
                   }}
                 >
-                  <b>4</b>
+                  <b>3</b>
                   <span>
                     Add Offline Report<small>Edit and submit in the edge panel</small>
                   </span>
@@ -908,7 +944,7 @@ export function App() {
                   disabled={!!busy || !online}
                   onClick={() => void run('Reconnect and sync', sync)}
                 >
-                  <b>5</b>
+                  <b>4</b>
                   <span>
                     Reconnect Network<small>Synchronize selected zone reports</small>
                   </span>
@@ -921,7 +957,7 @@ export function App() {
                 </button>
               </div>
               <div className="action-status" aria-live="polite">
-                {busy ? `${busy}…` : notice || 'Ready · start with a flash flood'}
+                {busy ? `${busy}…` : notice || 'Ready · configure the synthetic exercise above'}
               </div>
             </section>
             <section className="panel logs-panel" id="communications">
@@ -937,6 +973,17 @@ export function App() {
                 ))}
               </div>
               <div className="timeline">
+                {deliberation.session && submittedDisasters.length > 0 && (
+                  <div className="log-exercise-context" aria-label="Current exercise disasters">
+                    {submittedDisasters.map((disaster, index) => (
+                      <DisasterBadge
+                        disaster={disaster}
+                        zones={scenario.zones}
+                        key={`${disaster.kind}-${disaster.zoneId}-${index}`}
+                      />
+                    ))}
+                  </div>
+                )}
                 {[...scenario.events]
                   .reverse()
                   .filter(
@@ -954,7 +1001,7 @@ export function App() {
                   .map((e) => (
                     <article key={e.id}>
                       <time>{clock(e.occurredAt)}</time>
-                      <p>{e.message}</p>
+                      <p>{humanizeZoneIds(e.message, scenario.zones)}</p>
                     </article>
                   ))}
                 <small>End of event history · synthetic exercise</small>
@@ -1012,6 +1059,8 @@ export function App() {
                     setApprovals({});
                     await send(makeCommand('scenario.reset', {}));
                     saveQueue([]);
+                    setDisasters(defaultExercise());
+                    setSubmittedDisasters([]);
                     setSelected('');
                     setBody(initialReport);
                   });

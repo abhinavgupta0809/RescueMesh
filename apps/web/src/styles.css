@@ -508,6 +508,114 @@ select {
   background: #702936;
   color: #ffd5db;
 }
+.incident-row.flood {
+  border-left: 3px solid #4faee8;
+}
+.incident-row.fire {
+  border-left: 3px solid #f06b4f;
+}
+.incident-row.collision {
+  border-left: 3px solid #e6ab4f;
+}
+.incident-disaster {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+}
+.incident-disaster.flood {
+  color: #83cbfa;
+}
+.incident-disaster.fire {
+  color: #ff947c;
+}
+.incident-disaster.collision {
+  color: #f4c473;
+}
+.disaster-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 10px;
+  line-height: 1.25;
+  background: #0c1c27;
+}
+.disaster-badge.flood {
+  color: #83cbfa;
+  background: #102b3d;
+}
+.disaster-badge.fire {
+  color: #ff947c;
+  background: #39201d;
+}
+.disaster-badge.collision {
+  color: #f4c473;
+  background: #352a18;
+}
+.disaster-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 800;
+  flex: 0 0 auto;
+}
+.disaster-icon.flood {
+  color: #c8edff;
+  background: #17628e;
+}
+.disaster-icon.fire {
+  color: #fff0e8;
+  background: #a43d2f;
+}
+.disaster-icon.collision {
+  color: #251700;
+  background: #e6ab4f;
+}
+.incident-number .disaster-icon {
+  width: 24px;
+  height: 24px;
+}
+.incident-pin.flood circle {
+  fill: #17628e;
+  stroke: #83cbfa;
+}
+.incident-pin.fire circle {
+  fill: #9b362b;
+  stroke: #ff947c;
+}
+.incident-pin.collision circle {
+  fill: #8d641e;
+  stroke: #f4c473;
+}
+.map-disasters {
+  position: absolute;
+  top: 106px;
+  right: 12px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 245px;
+  padding: 8px;
+  border: 1px solid #324651;
+  border-radius: 5px;
+  background: #081721ed;
+  font-size: 10px;
+}
+.log-exercise-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
 .incident-copy {
   flex: 1;
   min-width: 0;

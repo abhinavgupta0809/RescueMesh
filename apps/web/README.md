@@ -1,10 +1,9 @@
 # RescueMesh frontend — Gemini deliberation
 
-Frontend branch: `codex/rescuemesh-frontend`. Backend dependency:
-`1a848f99976e1733dc7b244c150d8cbff9e3b2b3` (`claude/deliberation`).
-The isolated frontend branch was fast-forwarded to that committed handoff before implementation.
-This change edits only `apps/web`; no new dependencies, shared types, engine, backend,
-root configuration, main branch, or other active checkout were changed.
+Frontend branch: `codex/zone-selectable-frontend`. Backend dependency:
+`bb5eed27d178f4fdcc50386159a54fe634f94479` (`claude/multi-hazard`), based on
+`ea1f7f6`. The shared `StartSimulationRequest` type includes the backend's documented
+`disasters` field; no new endpoint or payload field is introduced.
 
 ## Run safely
 
@@ -30,16 +29,16 @@ for advice automatically.
 
 All calls go through `api-client.ts` and the typed `FrontendClient`.
 
-| Route                                         | Use                                                                      |
-| --------------------------------------------- | ------------------------------------------------------------------------ |
-| `GET /api/scenario`                           | Authoritative engine snapshot                                            |
-| `GET /api/world-state?since=<revision>`       | World polling every 3 seconds                                            |
-| `POST /api/simulations`                       | One `{step: "initial_flooding", requestId}` per Simulate                 |
-| `GET /api/simulations/:sessionId`             | Session status only; no model calls                                      |
-| `POST /api/simulations/:sessionId/final-plan` | Empty object body; engine candidate after ready/degraded                 |
-| `POST /api/commands`                          | Existing deterministic controls, reports, reset and `plan.approve`       |
-| `GET /api/recommendations`                    | Existing, manually requested independent chief advice                    |
-| `POST /api/recommendations/approve`           | Existing independent recommendation approval; proposes, never dispatches |
+| Route                                         | Use                                                                          |
+| --------------------------------------------- | ---------------------------------------------------------------------------- |
+| `GET /api/scenario`                           | Authoritative engine snapshot                                                |
+| `GET /api/world-state?since=<revision>`       | World polling every 3 seconds                                                |
+| `POST /api/simulations`                       | One atomic `{disasters: [{kind, zoneId, severity}], requestId}` per Simulate |
+| `GET /api/simulations/:sessionId`             | Session status only; no model calls                                          |
+| `POST /api/simulations/:sessionId/final-plan` | Empty object body; engine candidate after ready/degraded                     |
+| `POST /api/commands`                          | Existing deterministic controls, reports, reset and `plan.approve`           |
+| `GET /api/recommendations`                    | Existing, manually requested independent chief advice                        |
+| `POST /api/recommendations/approve`           | Existing independent recommendation approval; proposes, never dispatches     |
 
 Session envelopes use the shared `DeliberationSession`, positions, reviews, final brief and
 status enums from Claude's commit. The browser validates shape and provenance, rejects
@@ -54,8 +53,8 @@ approval route is not interpreted as a new session-approval endpoint.
 
 ## Deliberation and recovery
 
-- Simulate first requests the committed deterministic `initial_flooding` step, then displays
-  its acknowledged revision. It never claims the disaster happened before acknowledgement.
+- Simulate submits one or two selected disasters in one request, then displays both hazards,
+  their zones and the single acknowledged frozen revision.
 - The six-stage visible timeline accompanies five role cards, initial public positions,
   agreements, objections, revised recommendations and Commander synthesis.
 - Each returned section identifies Gemini or Scripted fallback, model, frozen scenario
@@ -88,10 +87,11 @@ approval route is not interpreted as a new session-approval endpoint.
 `deliberation-fixture.ts` is a frontend copy of the public recorded fixture from backend
 commit `1a848f9`, with model `recorded-deliberation-v1`. It is static exercise content,
 not live analysis of the current scenario. `mock-deliberation.ts` plays it through the same
-session interface with zero model calls. Only the UI's `initial_flooding` step is supported
-locally; unsupported steps fail explicitly. Its typed developments mirror Claude's recorded
-initial step and execute through the existing engine. Candidate planning and approval also
-use that engine, not a second simulator.
+session interface with zero model calls. Local mode accepts all three disaster kinds in every
+authoritative zone and any valid pair, then applies them through the same `scenario.exercise`
+engine command as one revision. Reset recreates the deterministic engine and session transport,
+so the same request produces the same world again. Candidate planning and approval also use
+that engine, not a second simulator.
 
 For backend connection, no frontend mock deletion is required: select API mode and run the
 dependent commit. Keep the fixture for reliable demos and automated tests. All capacities,
@@ -105,10 +105,10 @@ acknowledgements remove queued reports; rejected or uncertain reports remain ins
 Reset requires confirmation, resets the engine and clears the current mode's local queue
 and deliberation. Gemini never works offline.
 
-1. Trigger Flash Flood, close Birmingham Bridge, disconnect East / Swissvale.
-2. Enter a field report, Queue report, and inspect Sync queue.
-3. Reconnect Network; verify the acknowledged report leaves the queue.
-4. Select Simulate: one recorded flood step, five chiefs, Debate, Commander synthesis.
+1. Configure one disaster, add a second, choose their zones and select Simulate once.
+2. Verify both generated incidents, map badges and the single deterministic revision.
+3. Inspect five scripted chief positions, Cross-review and Incident Commander synthesis.
+4. Close Birmingham Bridge, disconnect East / Swissvale, queue a field report and reconnect.
 5. Check provenance and the **separate** engine resource plan, assignments and shortfalls.
 6. Approve Plan; confirm assigned resources and the engine's approval event.
 7. Run another Simulate and change the scenario: approval must be blocked as stale.
@@ -124,18 +124,16 @@ npm test
 npm run build -w @rescuemesh/web
 ```
 
-182 repository tests pass, including 55 frontend tests. Coverage includes progress states,
-five cards, partial results, debate/synthesis, mixed and full fallback provenance, malformed
-responses, one missing chief, provider failure, timeout, stale results, duplicate triggers,
-pending requests, cleanup, offline reports, reconnect, candidate approval and reset.
+240 repository tests pass. Frontend coverage includes every disaster/zone pairing, valid pairs,
+same-zone disasters, duplicate validation, maximum-two enforcement, stable request IDs, one
+atomic POST, frozen-revision handoff, accessible labels, scripted mock parity and complete reset,
+alongside the existing deliberation, offline, approval and stale-session flows.
 Seven new real-local-HTTP tests use the committed backend and engine with injected Gemini
 responses or no provider. Polling and candidate retries are asserted not to add model calls.
 
-The isolated Playwright smoke script `tests/browser-smoke.mjs` passes the full mock flow at
-1440×1000 and 390×844, including approval disabled while pending, reset mid-deliberation,
-stale blocking, no runtime errors and no page-width overflow. It blocks requests to any
-origin other than the isolated frontend. Screenshots were inspected on desktop and mobile;
-the existing map/layout remains intact.
+The browser smoke script `tests/browser-smoke.mjs` covers two-disaster selection, labels,
+approval disabled while pending, reset mid-deliberation, stale blocking, runtime errors and
+page-width overflow. It blocks requests to any origin other than the isolated frontend.
 
 Run with an independently installed Playwright module (no project dependency changes):
 

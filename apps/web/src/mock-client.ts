@@ -7,20 +7,25 @@ export const createSeed = (): Scenario => structuredClone(pittsburghFloodScenari
 
 /** Local transport, same deterministic engine. No cloud clients or duplicate simulation rules. */
 export function createMockClient(): FrontendClient {
-  const engine = new SimulationEngine();
-  const sessions = mockDeliberation(engine);
+  let engine = new SimulationEngine();
+  let sessions = mockDeliberation(engine);
   /** Revision the last served advice analyzed, so staleness matches the backend. */
   let lastAdviceRevision = -1;
   return {
     mode: 'mock',
-    startSimulation: sessions.startSimulation,
-    simulation: sessions.simulation,
-    finalPlan: sessions.finalPlan,
+    startSimulation: (request) => sessions.startSimulation(request),
+    simulation: (sessionId) => sessions.simulation(sessionId),
+    finalPlan: (sessionId) => sessions.finalPlan(sessionId),
     scenario: async () => engine.scenario,
     poll: async (revision) => (revision === engine.revision ? null : engine.scenario),
     command: async (command) => {
       const result = engine.execute(command);
-      if (result.ok && command.type === 'scenario.reset') sessions.clear();
+      if (result.ok && command.type === 'scenario.reset') {
+        sessions.clear();
+        engine = new SimulationEngine();
+        sessions = mockDeliberation(engine);
+        lastAdviceRevision = -1;
+      }
       return result;
     },
     recommendations: async () => {

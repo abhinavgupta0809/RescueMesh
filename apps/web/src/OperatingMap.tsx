@@ -1,6 +1,12 @@
 import { useState } from 'react';
-import type { Coordinate } from '@rescuemesh/shared';
+import type { Coordinate, DisasterSpecification } from '@rescuemesh/shared';
 import type { Scenario } from './contract';
+import {
+  DISASTER_PRESENTATION,
+  DisasterBadge,
+  disasterKindForIncident,
+  zoneForIncident
+} from './disaster-ui';
 
 // Deliberately schematic, interactive geography; no provider, tile requests or live routes.
 const point = (location: Coordinate) => ({
@@ -11,10 +17,12 @@ const labels = { hospital: 'H', fire_house: 'F', police_hub: 'P', rescue_center:
 export function OperatingMap({
   scenario,
   selected,
+  activeDisasters,
   onSelect
 }: {
   scenario: Scenario;
   selected: string;
+  activeDisasters: DisasterSpecification[];
   onSelect: (id: string) => void;
 }) {
   const [zoom, setZoom] = useState(1);
@@ -37,6 +45,18 @@ export function OperatingMap({
           </label>
         ))}
       </div>
+      {activeDisasters.length > 0 && (
+        <div className="map-disasters" aria-label="Disasters on operating map">
+          <strong>Synthetic exercise</strong>
+          {activeDisasters.map((disaster, index) => (
+            <DisasterBadge
+              disaster={disaster}
+              zones={scenario.zones}
+              key={`${disaster.kind}-${disaster.zoneId}-${index}`}
+            />
+          ))}
+        </div>
+      )}
       <svg
         viewBox="0 0 720 600"
         aria-label="Schematic Pittsburgh operating map. Use the labeled markers to inspect facilities and incidents."
@@ -204,14 +224,16 @@ export function OperatingMap({
           {layers.incidents &&
             scenario.incidents.map((incident, i) => {
               const p = point(incident.location);
+              const disasterKind = disasterKindForIncident(incident);
+              const incidentZone = zoneForIncident(incident.id, scenario.zones);
               return (
                 <g
                   key={incident.id}
                   role="button"
                   tabIndex={0}
-                  aria-label={`Incident ${i + 1}: ${incident.title}`}
+                  aria-label={`Incident ${i + 1}: ${incident.title}${disasterKind ? `, ${DISASTER_PRESENTATION[disasterKind].label}, ${incidentZone?.name ?? 'modeled zone'}` : ''}`}
                   aria-pressed={selected === incident.id}
-                  className={`map-marker incident-pin ${selected === incident.id ? 'selected' : ''}`}
+                  className={`map-marker incident-pin ${disasterKind ? DISASTER_PRESENTATION[disasterKind].tone : ''} ${selected === incident.id ? 'selected' : ''}`}
                   transform={`translate(${p.x + 18} ${p.y + 15})`}
                   onClick={() => onSelect(incident.id)}
                   onKeyDown={(e) => {
@@ -224,7 +246,7 @@ export function OperatingMap({
                   <title>{incident.title}</title>
                   <circle r="15" />
                   <text textAnchor="middle" dy="5">
-                    {i + 1}
+                    {disasterKind ? DISASTER_PRESENTATION[disasterKind].glyph : i + 1}
                   </text>
                 </g>
               );

@@ -1,5 +1,10 @@
 import type { SimulationEngine } from '@rescuemesh/engine';
-import { type DeliberationSession, type StartSimulationRequest } from '@rescuemesh/shared';
+import {
+  DISASTER_TEMPLATES,
+  validateExercise,
+  type DeliberationSession,
+  type StartSimulationRequest
+} from '@rescuemesh/shared';
 import { CHIEF_ROLES } from './deliberation-contract';
 import {
   FIXTURE_MODEL,
@@ -37,6 +42,37 @@ export function mockDeliberation(engine: SimulationEngine) {
     startSimulation: async (request: StartSimulationRequest) => {
       const prior = request.requestId && requests.get(request.requestId);
       if (prior) return structuredClone(get(prior));
+      if (request.disasters && request.step)
+        throw new Error(
+          'Send either disasters or a scripted step, not both. No state was changed.'
+        );
+      let disaster = 'Current scenario snapshot';
+      if (request.disasters) {
+        const validation = validateExercise(request.disasters, engine.scenario);
+        if (!validation.ok)
+          throw new Error(`${validation.rejection.message}. No state was changed.`);
+        const revision = engine.revision;
+        const fingerprint = validation.disasters
+          .map((item) => `${item.kind}@${item.zoneId}:${item.severity}`)
+          .join('+');
+        const exerciseId = `exercise-r${revision}-${fingerprint}`;
+        const result = engine.execute({
+          type: 'scenario.exercise',
+          commandId: `${exerciseId}-cmd`,
+          issuedAt: now(),
+          payload: {
+            exerciseId,
+            basedOnRevision: revision,
+            disasters: validation.disasters
+          }
+        });
+        if (!result.ok) throw new Error(result.error.message);
+        disaster = validation.disasters
+          .map(
+            (item) => `${DISASTER_TEMPLATES[item.kind].label} (${item.severity}) in ${item.zoneId}`
+          )
+          .join(' + ');
+      }
       if (request.step) {
         if (request.step !== 'initial_flooding')
           throw new Error(
@@ -86,12 +122,13 @@ export function mockDeliberation(engine: SimulationEngine) {
           }
         });
         if (!result.ok) throw new Error(result.error.message);
+        disaster = `Scripted step: ${request.step}`;
       }
       const session: DeliberationSession = {
         sessionId: `recorded-${crypto.randomUUID()}`,
         scenarioRevision: engine.revision,
         ...(request.step ? { scenarioStep: request.step } : {}),
-        disaster: request.step ? `Scripted step: ${request.step}` : 'Current scenario snapshot',
+        disaster,
         status: 'triggered',
         createdAt: now(),
         updatedAt: now(),
