@@ -1,0 +1,33 @@
+{
+  "name": "rescuemesh",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w @rescuemesh/api\" \"npm run dev -w @rescuemesh/web\"",
+    "build": "npm run build -w @rescuemesh/shared && npm run build -w @rescuemesh/api && npm run build -w @rescuemesh/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "format": "prettier --check .",
+    "test": "vitest run",
+    "check": "npm run format && npm run lint && npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.35.0",
+    "@types/node": "^24.3.1",
+    "concurrently": "^9.2.1",
+    "eslint": "^9.35.0",
+    "globals": "^16.4.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.42.0",
+    "vitest": "^4.1.11"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
