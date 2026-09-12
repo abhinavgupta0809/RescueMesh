@@ -196,11 +196,13 @@ This checks formatting, lint rules, TypeScript across all workspaces, seed/API t
 
 - **One fixed scenario:** stronger storytelling and fewer failure modes than a scenario editor.
 - **Shared compile-time types:** enough safety for the first demo without introducing a schema framework.
-- **Read-only scenario API:** the event model shows the intended evolution without prematurely building mutation/conflict logic.
+- **Commands, not writable resources:** one `POST /api/commands` endpoint with an idempotency key per command, so retries and replays are safe and every change is one auditable transition through the simulation engine.
 - **Deterministic mocks first:** integration credentials can be added one adapter at a time while keeping local development and judging reliable.
-- **No provider SDK:** the IFM endpoint is OpenAI-shaped, so one `fetch` call with a bearer token keeps the dependency tree and the failure surface small.
+- **No provider SDK:** the Gemini chiefs are one `fetch` call against `generateContent`, which keeps the dependency tree and the failure surface small and makes the fallback path easy to test.
 - **No real map SDK yet:** the stylized operating picture communicates hierarchy while avoiding keys, quotas, and a misleading claim of live routing.
 
 ## Next sensible slice
 
-Report parsing and the five chief roles now run on IFM K2 behind `ReasoningAdapter`. The next slice is human approval: turning a parsed draft into an incident and an accepted recommendation into a world-state event. A later OR-Tools adapter can optimize against the same resource, incident, and route records while retaining deterministic fixtures for tests.
+The five chiefs run on Gemini behind `ReasoningAdapter`, and the eight-step command flow is wired end to end through the deterministic simulation engine. The IFM/K2 client is development tooling only and is never invoked for chiefs.
+
+The next sensible slices, in order: persist world state behind `WorldStateStore` so a restart does not return to the seed; retire `apps/web/src/mock-client.ts` now that the engine covers the same behaviour; then dispatch and completion transitions (`dispatched` -> `complete`).
