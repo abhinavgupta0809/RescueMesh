@@ -106,20 +106,23 @@ export const checkInvariants = (scenario: Scenario): InvariantViolation[] => {
     for (const assignment of plan.assignments) checkAssignment(assignment, `plan ${plan.id}`);
   }
 
-  // I5 — an active assignment never routes a unit over a closed route.
-  for (const assignment of scenario.assignments.filter(isActive)) {
-    for (const resourceId of assignment.resourceIds) {
-      const resource = scenario.resources.find((candidate) => candidate.id === resourceId);
-      if (!resource) continue;
-      const route = scenario.routes.find(
-        (candidate) =>
-          candidate.fromId === resource.homeFacilityId && candidate.toId === assignment.incidentId
-      );
-      if (route?.status === 'closed') {
-        add('I5', `assignment ${assignment.id} uses closed route ${route.id}`, [
-          assignment.id,
-          route.id
-        ]);
+  // I5 — a PROPOSED plan never routes a unit over a closed route.
+  // Assignments already approved or dispatched may be stranded by a later
+  // closure; that is a real condition the exercise wants to surface, not a
+  // broken state, so it is not an invariant violation.
+  for (const plan of scenario.plans) {
+    if (plan.status !== 'proposed') continue;
+    for (const assignment of plan.assignments) {
+      for (const resourceId of assignment.resourceIds) {
+        const resource = scenario.resources.find((candidate) => candidate.id === resourceId);
+        if (!resource) continue;
+        const route = scenario.routes.find(
+          (candidate) =>
+            candidate.fromId === resource.homeFacilityId && candidate.toId === assignment.incidentId
+        );
+        if (route?.status === 'closed') {
+          add('I5', `proposed plan ${plan.id} uses closed route ${route.id}`, [plan.id, route.id]);
+        }
       }
     }
   }
@@ -228,6 +231,31 @@ export const checkInvariants = (scenario: Scenario): InvariantViolation[] => {
   for (const plan of scenario.plans) {
     if (!plan.forecast.synthetic) {
       add('I11', `plan ${plan.id} has an unlabelled impact forecast`, [plan.id]);
+    }
+  }
+
+  // I13 — modeled capacities stay within valid bounds.
+  for (const facility of scenario.facilities) {
+    if (facility.syntheticCapacity < 0) {
+      add('I13', `facility ${facility.id} has negative modeled capacity`, [facility.id]);
+    }
+    if (facility.currentLoad < 0) {
+      add('I13', `facility ${facility.id} has negative load`, [facility.id]);
+    }
+    if (facility.currentLoad > facility.syntheticCapacity) {
+      add(
+        'I13',
+        `facility ${facility.id} is loaded ${facility.currentLoad} over a modeled capacity of ${facility.syntheticCapacity}`,
+        [facility.id]
+      );
+    }
+  }
+  for (const resource of scenario.resources) {
+    if (resource.crew < 0) add('I13', `resource ${resource.id} has negative crew`, [resource.id]);
+  }
+  for (const incident of scenario.incidents) {
+    if (incident.peopleAtRisk < 0) {
+      add('I13', `incident ${incident.id} has negative people at risk`, [incident.id]);
     }
   }
 

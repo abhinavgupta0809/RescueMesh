@@ -56,12 +56,47 @@ describe('invariant detection', () => {
     expect(codes(scenario)).toContain('I4');
   });
 
-  it('I5 catches an active assignment over a closed route', () => {
+  it('I5 catches a proposed plan over a closed route', () => {
     const scenario = clone();
     const route = scenario.routes.find((candidate) => candidate.id === 'route-river-parkway');
     if (!route) throw new Error('seed needs route-river-parkway');
     route.status = 'closed';
+    scenario.plans = [
+      {
+        id: 'plan-closed',
+        status: 'proposed',
+        createdAt: '2026-07-18T18:41:00-04:00',
+        basedOnRevision: 0,
+        generatedBy: 'mock',
+        assignments: [
+          {
+            id: 'as-closed',
+            incidentId: 'inc-parkway',
+            resourceIds: ['boat-2'],
+            priority: 1,
+            status: 'proposed',
+            rationale: 'test'
+          }
+        ],
+        rationale: 'test',
+        shortfalls: [],
+        forecast: {
+          synthetic: true,
+          peopleReachableWithin30Min: 0,
+          unmetCapabilityCount: 0,
+          modeledTotalTravelMinutes: 0
+        }
+      }
+    ];
     expect(codes(scenario)).toContain('I5');
+  });
+
+  it('I5 allows a dispatched unit to be stranded by a later closure', () => {
+    const scenario = clone();
+    const route = scenario.routes.find((candidate) => candidate.id === 'route-river-parkway');
+    if (!route) throw new Error('seed needs route-river-parkway');
+    route.status = 'closed';
+    expect(codes(scenario)).not.toContain('I5');
   });
 
   it('I6 catches a closed bridge whose route is still open', () => {

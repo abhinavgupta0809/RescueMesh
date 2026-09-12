@@ -44,7 +44,7 @@ online ──disconnect──> offline ──reconnect──> online
 | `degraded` | `online`   | `zone.set_connectivity` (online)   |
 | `offline`  | `online`   | `zone.set_connectivity` (online)   |
 
-`degraded` accepts writes but the client must label the data stale. `offline` rejects writes from that zone with `zone_offline`, which is the signal for the device to queue locally. Setting a zone to the connectivity it already has is a no-op success with `duplicate: false` and no event.
+`degraded` accepts writes but the client must label the data stale. `offline` accepts a `report.submit` but only _queues_ it — `queuedOffline: true`, no incident raised until `report.sync`. Other writes from that zone are rejected with `zone_offline`. Setting a zone to the connectivity it already has is a no-op success with `duplicate: false` and no event.
 
 The **client's own** online/offline state is browser-local and is not server state. The client decides to queue; the server decides whether a report is accepted.
 
