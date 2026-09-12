@@ -1,269 +1,919 @@
-import { useEffect, useMemo, useState } from 'react';
-import { pittsburghFloodScenario, type Scenario, type Severity } from '@rescuemesh/shared';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import { createClient, makeCommand, ApiError } from './api-client';
+import type { Command, FieldReport, FrontendClient, Recommendation, Scenario } from './contract';
+import { readQueue, writeQueue } from './offline-queue';
+import { OperatingMap } from './OperatingMap';
 
-const apiUrl = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
-const severityOrder: Record<Severity, number> = { critical: 0, high: 1, moderate: 2, low: 3 };
-const agentNames = {
-  incident_commander: 'Incident Commander',
-  medical_chief: 'Medical Chief',
-  police_chief: 'Police Chief',
-  rescue_chief: 'Rescue Chief',
-  logistics_chief: 'Logistics Chief'
+const kindNames = {
+  ambulance: 'Ambulances',
+  rescue_boat: 'Rescue teams',
+  fire_engine: 'Fire engines',
+  police_unit: 'Police units',
+  supply_truck: 'Supply trucks'
 };
-
+const initialReport =
+  'Around 40 people at the East End school need evacuation assistance and drinking water.';
+const clock = (value: string) =>
+  new Date(value).toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: 'America/New_York'
+  });
 export function App() {
-  const [scenario, setScenario] = useState<Scenario>(pittsburghFloodScenario);
-  const [connection, setConnection] = useState<'connecting' | 'live' | 'demo'>('connecting');
-
-  useEffect(() => {
-    const controller = new AbortController();
-    fetch(`${apiUrl}/api/scenario`, { signal: controller.signal })
-      .then((response) => {
-        if (!response.ok) throw new Error('Scenario request failed');
-        return response.json() as Promise<Scenario>;
-      })
-      .then((data) => {
-        setScenario(data);
-        setConnection('live');
-      })
-      .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === 'AbortError') return;
-        setConnection('demo');
-      });
-    return () => controller.abort();
-  }, []);
-
-  const incidents = useMemo(
-    () =>
-      [...scenario.incidents].sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]),
-    [scenario]
+  const [mode, setMode] = useState<'mock' | 'api'>(
+    import.meta.env.VITE_API_MODE === 'api' ? 'api' : 'mock'
   );
-  const available = scenario.resources.filter((resource) => resource.status === 'available').length;
-
+  const client = useRef<FrontendClient>(createClient(mode));
+  const [scenario, setScenario] = useState<Scenario | null>(null);
+  const stateRef = useRef(scenario);
+  stateRef.current = scenario;
+  const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
+  const [queue, setQueue] = useState<FieldReport[]>([]);
+  const [queueReady, setQueueReady] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState('');
+  const locked = useRef(false);
+  const [selectedZone, setSelectedZone] = useState('');
+  const [selected, setSelected] = useState('');
+  const [body, setBody] = useState(initialReport);
+  const [edgeTab, setEdgeTab] = useState('Field reports');
+  const [logTab, setLogTab] = useState('Global log');
+  const [nav, setNav] = useState('Command center');
+  const [online, setOnline] = useState(navigator.onLine);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [lastSync, setLastSync] = useState('');
+  const refresh = useCallback(async (active: FrontendClient) => {
+    const value = await active.scenario();
+    if (client.current !== active) return;
+    setScenario(value);
+    setLastSync(clock(value.simulatedTime));
+    try {
+      const recs = await active.recommendations();
+      if (client.current === active) setRecommendations(recs);
+    } catch (e) {
+      if (client.current === active) {
+        setRecommendations([]);
+        setError(e instanceof Error ? e.message : 'Recommendations unavailable.');
+      }
+    }
+  }, []);
+  useEffect(() => {
+    const active = createClient(mode);
+    client.current = active;
+    setScenario(null);
+    setRecommendations([]);
+    setError('');
+    setQueueReady(false);
+    setSelected('');
+    setSelectedZone('');
+    setNotice('');
+    try {
+      setQueue(readQueue(localStorage, mode));
+      setQueueReady(true);
+    } catch (e) {
+      setError(String(e));
+    }
+    setBusy('Loading operating picture');
+    refresh(active)
+      .catch((e) => {
+        if (client.current === active) setError(String(e.message));
+      })
+      .finally(() => {
+        if (client.current === active) setBusy('');
+      });
+    const timer = window.setInterval(async () => {
+      if (locked.current || !stateRef.current) return;
+      try {
+        const next = await active.poll(stateRef.current.revision);
+        if (client.current !== active || locked.current) return;
+        if (next) {
+          setScenario(next);
+          setLastSync(clock(next.simulatedTime));
+          const recs = await active.recommendations();
+          if (client.current === active && !locked.current) setRecommendations(recs);
+        }
+      } catch (e) {
+        if (client.current === active) setError(e instanceof Error ? e.message : 'Polling failed.');
+      }
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [mode, refresh]);
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    return () => {
+      window.removeEventListener('online', update);
+      window.removeEventListener('offline', update);
+    };
+  }, []);
+  function saveQueue(next: FieldReport[]) {
+    if (!queueReady)
+      throw new Error('Report storage is unavailable. The saved queue has not been overwritten.');
+    try {
+      writeQueue(localStorage, mode, next);
+    } catch {
+      throw new Error(
+        'Device storage is full or unavailable. Report was not queued; keep your text and retry.'
+      );
+    }
+    setQueue(next);
+  }
+  async function send(command: Command) {
+    const response = await client.current.command(command);
+    if (!response.ok) throw new ApiError(response.error.message, response.error.code);
+    return response;
+  }
+  async function run(label: string, action: () => Promise<void>) {
+    if (locked.current) return;
+    locked.current = true;
+    setBusy(label);
+    setError('');
+    setNotice('');
+    try {
+      await action();
+      await refresh(client.current);
+      setNotice(`${label} complete${mode === 'mock' ? ' · mock simulation' : ''}.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Action failed.');
+    } finally {
+      locked.current = false;
+      setBusy('');
+    }
+  }
+  const zone = scenario?.zones.find((z) => z.id === selectedZone) ?? scenario?.zones[2];
+  const plan = scenario?.plans.find((p) => p.status === 'proposed') ?? scenario?.plans.at(-1);
+  const bridge = scenario?.bridges[0];
+  const available = scenario?.resources.filter((r) => r.status === 'available').length ?? 0;
+  const detail =
+    scenario?.facilities.find((f) => f.id === selected) ??
+    scenario?.incidents.find((i) => i.id === selected);
+  function act(label: string, command: Command) {
+    void run(label, async () => {
+      await send(command);
+    });
+  }
+  async function submitReport() {
+    if (!zone || !body.trim() || body.length > 4000) return;
+    const report: FieldReport = {
+      clientReportId: crypto.randomUUID(),
+      zoneId: zone.id,
+      body: body.trim(),
+      capturedAt: new Date().toISOString(),
+      syncState: 'queued'
+    };
+    saveQueue([...queue, report]); // Write ahead: an uncertain acknowledgement retains the same ID.
+    if (zone.connectivity === 'offline' || !online) {
+      setBody('');
+      setEdgeTab('Sync queue');
+      return;
+    }
+    try {
+      const result = await send(makeCommand('report.submit', report));
+      if (result.type === 'report.submit' && !result.data.queuedOffline) saveQueue(queue);
+      setBody('');
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'zone_offline') {
+        setBody('');
+        setEdgeTab('Sync queue');
+        return;
+      }
+      throw e;
+    }
+  }
+  async function sync() {
+    if (!zone) return;
+    if (zone.connectivity !== 'online')
+      await send(makeCommand('zone.set_connectivity', { zoneId: zone.id, connectivity: 'online' }));
+    const pending = queue.filter((r) => r.zoneId === zone.id);
+    if (!pending.length) return;
+    const result = await send(
+      makeCommand('report.sync', {
+        reports: pending.map(({ clientReportId, zoneId, body, capturedAt }) => ({
+          clientReportId,
+          zoneId,
+          body,
+          capturedAt
+        }))
+      })
+    );
+    if (result.type === 'report.sync') {
+      const acknowledged = [...result.data.applied, ...result.data.duplicates].map(
+        (r) => r.clientReportId
+      );
+      saveQueue(
+        queue
+          .filter((r) => !acknowledged.includes(r.clientReportId))
+          .map((r) => {
+            const rejected = result.data.rejected.find(
+              (v) => v.clientReportId === r.clientReportId
+            );
+            return rejected
+              ? {
+                  ...r,
+                  syncState: 'rejected',
+                  rejectionReason: rejected.rejectionReason ?? 'Rejected by server.'
+                }
+              : r;
+          })
+      );
+      if (result.data.rejected.length)
+        throw new Error(
+          `${result.data.rejected.length} report(s) rejected. Retained in the device queue for inspection.`
+        );
+    }
+  }
   return (
     <main>
       <header className="topbar">
-        <div className="brand-mark">RM</div>
-        <div>
-          <p className="eyebrow">Unified response network</p>
-          <h1>
-            RescueMesh <span>/ Pittsburgh</span>
-          </h1>
+        <a className="brand" href="#command-center" onClick={() => setNav('Command center')}>
+          <strong>
+            Rescue<span>Mesh</span>
+          </strong>
+          <small>Coordinate. Adapt. Keep going.</small>
+        </a>
+        <nav aria-label="Main navigation">
+          {['Command center', 'Assets', 'Incidents', 'Analytics', 'Communications'].map((item) => (
+            <a
+              key={item}
+              className={nav === item ? 'active' : ''}
+              href={`#${{ 'Command center': 'command-center', Assets: 'assets', Incidents: 'incidents', Analytics: 'recommendations', Communications: 'communications' }[item]}`}
+              onClick={() => setNav(item)}
+            >
+              {item}
+            </a>
+          ))}
+        </nav>
+        <div className="connection">
+          <strong className={mode === 'mock' ? 'amber' : error ? 'red' : 'green'}>
+            {mode === 'mock' ? 'Mock simulation' : error ? 'API needs attention' : 'API mode'}
+          </strong>
+          <small>
+            {online
+              ? `Last state · ${lastSync || 'connecting'}`
+              : 'Device offline · reports stay local'}
+          </small>
         </div>
-        <div className="scenario-clock">
-          <span className={`pulse ${connection}`} />
-          <div>
-            <strong>
-              {connection === 'live'
-                ? 'API connected'
-                : connection === 'demo'
-                  ? 'Local demo data'
-                  : 'Connecting'}
-            </strong>
-            <small>Simulated · 18:40 EDT</small>
-          </div>
+        <div className="clock">
+          <small>EXERCISE CLOCK</small>
+          <strong>{scenario ? clock(scenario.simulatedTime) : '—:—'}</strong>
         </div>
       </header>
-
-      <section className="summary-strip" aria-label="Scenario summary">
-        <Summary
-          label="Active incidents"
-          value={String(incidents.length).padStart(2, '0')}
-          accent="alert"
-        />
-        <Summary
-          label="People at risk"
-          value={String(incidents.reduce((sum, incident) => sum + incident.peopleAtRisk, 0))}
-          accent="warning"
-        />
-        <Summary
-          label="Units available"
-          value={`${available}/${scenario.resources.length}`}
-          accent="safe"
-        />
-        <Summary
-          label="Road restrictions"
-          value={String(scenario.routes.filter((route) => route.status !== 'open').length).padStart(
-            2,
-            '0'
-          )}
-          accent="neutral"
-        />
-      </section>
-
-      <div className="dashboard-grid">
-        <section className="panel incidents-panel">
-          <PanelHeader kicker="01 / Triage" title="Active incidents" badge="Priority queue" />
-          <div className="incident-list">
-            {incidents.map((incident, index) => (
-              <article className="incident" key={incident.id}>
-                <div className={`incident-index ${incident.severity}`}>
-                  {String(index + 1).padStart(2, '0')}
-                </div>
-                <div className="incident-body">
-                  <div className="incident-title-row">
-                    <h3>{incident.title}</h3>
-                    <span className={`severity ${incident.severity}`}>{incident.severity}</span>
-                  </div>
-                  <p>{incident.address}</p>
-                  <div className="incident-meta">
-                    <span>{incident.peopleAtRisk} people</span>
-                    <span>{incident.requiredCapabilities.join(' · ')}</span>
-                  </div>
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel map-panel">
-          <PanelHeader
-            kicker="02 / Operating picture"
-            title="Pittsburgh flood map"
-            badge="Synthetic routes"
-          />
-          <div
-            className="map-canvas"
-            role="img"
-            aria-label="Stylized map showing incidents and response facilities"
+      <div className="exercise">
+        <span>
+          EXERCISE ONLY{' '}
+          <span className="muted">
+            / All incidents, capacities, forecasts and travel estimates are synthetic.
+          </span>
+        </span>
+        <label>
+          Data source{' '}
+          <select
+            aria-label="Data source"
+            disabled={!!busy}
+            value={mode}
+            onChange={(e) => setMode(e.target.value as 'mock' | 'api')}
           >
-            <div className="river river-a" />
-            <div className="river river-b" />
-            <div className="road road-a" />
-            <div className="road road-b" />
-            <div className="road road-c" />
-            <span className="district downtown">DOWNTOWN</span>
-            <span className="district oakland">OAKLAND</span>
-            <span className="district south">SOUTH SIDE</span>
-            {scenario.facilities.slice(0, 7).map((facility, index) => (
-              <span key={facility.id} className={`marker facility m${index}`} title={facility.name}>
-                +
-              </span>
-            ))}
-            {incidents.map((incident, index) => (
-              <span
-                key={incident.id}
-                className={`marker incident-marker i${index}`}
-                title={incident.title}
-              >
-                <b>{index + 1}</b>
-              </span>
-            ))}
-            <div className="map-legend">
-              <span>
-                <i className="legend-facility">+</i> Facility
-              </span>
-              <span>
-                <i className="legend-incident" /> Incident
-              </span>
-              <span>
-                <i className="legend-route" /> Restricted route
-              </span>
+            <option value="mock">Local mock</option>
+            <option value="api">Backend API</option>
+          </select>
+        </label>
+      </div>
+      {error && (
+        <div role="alert" className="message error">
+          {error}
+          <button disabled={!!busy} onClick={() => void run('Refresh', async () => {})}>
+            Retry refresh
+          </button>
+        </div>
+      )}
+      <div className="sr-only" role="status" aria-live="polite">
+        {busy || notice}
+      </div>
+      {!scenario ? (
+        <section className="loading panel">
+          <h2>{busy || 'Operating picture unavailable'}</h2>
+          <p>
+            {error
+              ? 'Check the API or explicitly select Local mock to run the demo.'
+              : 'Loading the synthetic Pittsburgh scenario…'}
+          </p>
+        </section>
+      ) : (
+        <>
+          <div className="upper-grid" id="command-center">
+            <aside className="sidebar panel">
+              <h2>Zones</h2>
+              <div className="zone-list">
+                {scenario.zones.map((z, i) => (
+                  <button
+                    key={z.id}
+                    className={`zone-button ${z.id === zone?.id ? 'selected' : ''} ${z.connectivity}`}
+                    onClick={() => setSelectedZone(z.id)}
+                  >
+                    <span>
+                      <strong>Zone {String.fromCharCode(65 + i)}</strong>
+                      <small>{z.name}</small>
+                    </span>
+                    <span className={`status ${z.connectivity}`}>{z.connectivity}</span>
+                  </button>
+                ))}
+              </div>
+              <h2>Key metrics</h2>
+              <Metric
+                value={scenario.incidents.reduce((n, i) => n + i.peopleAtRisk, 0)}
+                label="People at risk"
+                color="blue"
+              />
+              <Metric
+                value={scenario.incidents.filter((i) => i.status === 'active').length}
+                label="Active incidents"
+                color="red"
+              />
+              <Metric
+                value={`${available} / ${scenario.resources.length}`}
+                label="Units available"
+                color="amber"
+              />
+              <Metric
+                value={scenario.facilities
+                  .filter((f) => f.kind === 'hospital')
+                  .reduce((n, f) => n + f.syntheticCapacity - f.currentLoad, 0)}
+                label="Hospital spaces"
+                color="green"
+              />
+              <Metric
+                value={scenario.routes.filter((r) => r.status === 'closed').length}
+                label="Closed routes"
+                color="red"
+              />
+              <Metric
+                value={scenario.zones.filter((z) => z.connectivity === 'offline').length}
+                label="Zones offline"
+                color="red"
+              />
+              <div className="sidebar-foot">
+                <span className="green">Deterministic exercise</span>
+                <small>
+                  State revision {scenario.revision}
+                  <br />
+                  {scenario.facilities.length} response facilities
+                </small>
+              </div>
+            </aside>
+            <section className="panel map-panel">
+              <Heading title="Pittsburgh · Operating map" aside="SCHEMATIC" />
+              <OperatingMap scenario={scenario} selected={selected} onSelect={setSelected} />
+              <div className="map-detail" aria-live="polite">
+                {detail ? (
+                  <>
+                    <strong>{'name' in detail ? detail.name : detail.title}</strong>
+                    <span>
+                      {'syntheticCapacity' in detail
+                        ? `${detail.kind.replaceAll('_', ' ')} · ${detail.currentLoad}/${detail.syntheticCapacity} synthetic load · ${detail.status}`
+                        : `${detail.severity} · ${detail.peopleAtRisk} modeled people at risk · ${detail.description}`}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <strong>Shared operating picture</strong>
+                    <span>
+                      Select a facility or incident to inspect. Boundaries and routes are
+                      approximate.
+                    </span>
+                  </>
+                )}
+              </div>
+            </section>
+            <div className="right-grid">
+              <section className="panel incident-panel" id="incidents">
+                <Heading title="Active incidents" aside={`${scenario.incidents.length} TOTAL`} />
+                <div className="incident-list">
+                  {scenario.incidents.map((incident, i) => (
+                    <button
+                      className={`incident-row ${selected === incident.id ? 'selected' : ''}`}
+                      key={incident.id}
+                      onClick={() => setSelected(incident.id)}
+                    >
+                      <span className={`incident-number ${incident.severity}`}>
+                        {String(i + 1).padStart(2, '0')}
+                      </span>
+                      <span className="incident-copy">
+                        <strong>{incident.title}</strong>
+                        <small>{incident.address}</small>
+                      </span>
+                      <span className={`tag ${incident.severity}`}>{incident.severity}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+              <section className="panel resource-panel" id="assets">
+                <Heading title="Resource availability" aside="SYNTHETIC" />
+                <div className="resource-bars">
+                  {Object.entries(kindNames).map(([kind, name]) => {
+                    const units = scenario.resources.filter((r) => r.kind === kind);
+                    const free = units.filter((r) => r.status === 'available').length;
+                    return (
+                      <div className={`resource-bar ${kind}`} key={kind}>
+                        <div>
+                          <strong>{name}</strong>
+                          <span>
+                            {free} / {units.length}
+                          </span>
+                        </div>
+                        <progress
+                          aria-label={`${name} available`}
+                          value={free}
+                          max={units.length || 1}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+                <details>
+                  <summary>Inspect {scenario.resources.length} units</summary>
+                  {scenario.resources.map((r) => (
+                    <div className="unit" key={r.id}>
+                      <strong>{r.callsign}</strong>
+                      <span className={r.status === 'available' ? 'green' : 'amber'}>
+                        {r.status.replaceAll('_', ' ')}
+                      </span>
+                    </div>
+                  ))}
+                </details>
+              </section>
+              <section className="panel recommendation-panel" id="recommendations">
+                <Heading
+                  title="Resource recommendation"
+                  aside={plan ? `${plan.generatedBy} · ${plan.status}` : 'HUMAN REVIEW'}
+                />
+                <div className="plan-content">
+                  <div className="plan-summary">
+                    {plan ? (
+                      <>
+                        <p>{plan.rationale}</p>
+                        <ol>
+                          {plan.assignments.map((a) => (
+                            <li key={a.id}>
+                              <strong>
+                                {a.resourceIds
+                                  .map(
+                                    (id) => scenario.resources.find((r) => r.id === id)?.callsign
+                                  )
+                                  .join(', ')}
+                              </strong>
+                              <span>
+                                {' '}
+                                → {scenario.incidents.find((i) => i.id === a.incidentId)?.title}
+                              </span>
+                            </li>
+                          ))}
+                        </ol>
+                        {plan.shortfalls.length > 0 && (
+                          <p className="amber">
+                            {plan.shortfalls.length} incident(s) have unmet needs. Review shortfalls
+                            below.
+                          </p>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <p className="plan-lead">
+                          A coordinated response starts with a reviewed plan.
+                        </p>
+                        <p>
+                          Generate a capability-matched proposal, inspect modeled impact, then
+                          approve resource assignments.
+                        </p>
+                        <div className="plan-hint">
+                          Available units are only assigned after your approval.
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <div className="plan-actions">
+                    <button
+                      className="primary"
+                      disabled={
+                        !!busy ||
+                        (!!plan &&
+                          plan.status === 'proposed' &&
+                          plan.basedOnRevision !== scenario.revision)
+                      }
+                      onClick={() =>
+                        act(
+                          plan?.status === 'proposed' ? 'Plan approval' : 'Plan proposal',
+                          plan?.status === 'proposed'
+                            ? makeCommand('plan.approve', { planId: plan.id }, scenario.revision)
+                            : makeCommand('plan.propose', {})
+                        )
+                      }
+                    >
+                      {plan?.status === 'proposed' ? 'Approve Plan' : 'Generate Plan'}
+                    </button>
+                    <button
+                      disabled={!!busy}
+                      onClick={() =>
+                        act(
+                          'Alternate plan simulation',
+                          makeCommand('plan.propose', {
+                            reserveUnitsPerKind: 0,
+                            incidentIds: scenario.incidents
+                              .filter((i) => i.status === 'active')
+                              .map((i) => i.id)
+                              .reverse()
+                          })
+                        )
+                      }
+                    >
+                      Simulate Alternate Plan
+                    </button>
+                    {plan?.status === 'proposed' && plan.basedOnRevision !== scenario.revision && (
+                      <small className="amber">
+                        Plan is stale. Simulate again to review current state.
+                      </small>
+                    )}
+                  </div>
+                </div>
+                <h3 className="forecast-title">
+                  Impact forecast <span>· synthetic, proposed assignments only</span>
+                </h3>
+                <div className="forecast">
+                  <Forecast
+                    label="Total travel"
+                    value={plan ? `${plan.forecast.modeledTotalTravelMinutes} min` : '—'}
+                  />
+                  <Forecast
+                    label="Unmet capabilities"
+                    value={plan?.forecast.unmetCapabilityCount ?? '—'}
+                  />
+                  <Forecast
+                    label="People reachable / 30m"
+                    value={plan?.forecast.peopleReachableWithin30Min ?? '—'}
+                  />
+                  <Forecast
+                    label="Units in plan"
+                    value={plan?.assignments.reduce((n, a) => n + a.resourceIds.length, 0) ?? '—'}
+                  />
+                </div>
+                <details className="chiefs">
+                  <summary>
+                    Five chiefs · rationale & provenance
+                    {plan?.shortfalls.length ? ` · ${plan.shortfalls.length} shortfalls` : ''}
+                  </summary>
+                  {plan?.shortfalls.map((s) => (
+                    <p className="amber" key={s.incidentId}>
+                      {scenario.incidents.find((i) => i.id === s.incidentId)?.title}:{' '}
+                      {s.missingCapabilities.join(', ')}. {s.reason}
+                    </p>
+                  ))}
+                  {recommendations.length ? (
+                    recommendations.map(({ recommendation: r, source }) => (
+                      <article key={r.id}>
+                        <strong>
+                          {r.agent.replaceAll('_', ' ')}{' '}
+                          <span className="tag">
+                            {source.provider} · {Math.round(r.confidence * 100)}%
+                          </span>
+                        </strong>
+                        <p>
+                          {r.summary}. {r.action}
+                        </p>
+                        <small>
+                          {source.model} · {r.status}
+                          {source.degraded
+                            ? ` · Degraded: ${source.warning ?? 'provider fallback'}`
+                            : ''}
+                        </small>
+                      </article>
+                    ))
+                  ) : (
+                    <p>Recommendations unavailable. Retry refresh to load provenance.</p>
+                  )}
+                </details>
+              </section>
             </div>
           </div>
-        </section>
-
-        <section className="panel resources-panel">
-          <PanelHeader
-            kicker="03 / Deployment"
-            title="Response units"
-            badge={`${available} available`}
-          />
-          <div className="resource-list">
-            {scenario.resources.map((resource) => (
-              <div className="resource" key={resource.id}>
-                <span className={`resource-dot ${resource.status}`} />
-                <div>
-                  <strong>{resource.callsign}</strong>
-                  <small>{resource.kind.replaceAll('_', ' ')}</small>
-                </div>
-                <span className="resource-status">{resource.status.replace('_', ' ')}</span>
+          <div className="bottom-grid">
+            <section className="panel edge-panel">
+              <Heading
+                title={`Edge node · ${zone?.name ?? 'Select a zone'}`}
+                aside={zone?.connectivity ?? ''}
+              />
+              <div className="tabs" aria-label="Edge node views">
+                {['Field reports', 'Local resources', 'Sync queue'].map((t) => (
+                  <button aria-pressed={edgeTab === t} key={t} onClick={() => setEdgeTab(t)}>
+                    {t}
+                    {t === 'Sync queue' ? ` (${queue.length})` : ''}
+                  </button>
+                ))}
               </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel agents-panel">
-          <PanelHeader
-            kicker="04 / Decision layer"
-            title="AI chief recommendations"
-            badge="5 roles online"
-          />
-          <div className="recommendations">
-            {scenario.recommendations.map((recommendation) => (
-              <article className="recommendation" key={recommendation.id}>
-                <div className="agent-avatar">
-                  {agentNames[recommendation.agent]
-                    .split(' ')
-                    .map((word) => word[0])
-                    .join('')
-                    .slice(0, 2)}
+              {edgeTab === 'Field reports' ? (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void run(
+                      zone?.connectivity === 'offline' || !online
+                        ? 'Offline report queued'
+                        : 'Field report submission',
+                      submitReport
+                    );
+                  }}
+                >
+                  <label htmlFor="report">
+                    Report an incident <span className="muted">· {zone?.name}</span>
+                  </label>
+                  <textarea
+                    id="report"
+                    value={body}
+                    onChange={(e) => setBody(e.target.value)}
+                    maxLength={4000}
+                    required
+                    rows={3}
+                  />
+                  <div className="form-actions">
+                    <small>
+                      {body.length}/4000 ·{' '}
+                      {zone?.connectivity === 'offline' || !online
+                        ? 'Stored on this device until sync'
+                        : zone?.connectivity === 'degraded'
+                          ? 'Degraded connection · state may be stale'
+                          : 'Sent to command center'}
+                    </small>
+                    <button
+                      className="blue-button"
+                      disabled={!!busy || !body.trim() || !queueReady}
+                    >
+                      {zone?.connectivity === 'offline' || !online
+                        ? 'Queue report'
+                        : 'Submit report'}
+                    </button>
+                  </div>
+                  <div className="edge-info">
+                    <div>
+                      <strong>Local continuity</strong>
+                      <p>Reports stay on this device across refreshes. Reconnect to synchronize.</p>
+                    </div>
+                    <div>
+                      <strong>Commander review</strong>
+                      <p>Field details remain unverified. No automatic dispatch.</p>
+                    </div>
+                  </div>
+                </form>
+              ) : edgeTab === 'Sync queue' ? (
+                <div className="queue-list">
+                  {queue.length ? (
+                    queue.map((r) => (
+                      <article key={r.clientReportId}>
+                        <strong>
+                          {scenario.zones.find((z) => z.id === r.zoneId)?.name} · {r.syncState}
+                        </strong>
+                        <p>{r.body}</p>
+                        {r.rejectionReason && <p className="red">{r.rejectionReason}</p>}
+                        <small>{r.clientReportId.slice(0, 8)} · retained on device</small>
+                      </article>
+                    ))
+                  ) : (
+                    <p className="empty">
+                      No queued reports. All acknowledged reports have left the device queue.
+                    </p>
+                  )}
+                  <button
+                    disabled={!!busy || !queue.length || !online}
+                    onClick={() => void run('Reconnect and sync', sync)}
+                  >
+                    Synchronize selected zone
+                  </button>
                 </div>
-                <div>
-                  <p className="agent-name">
-                    {agentNames[recommendation.agent]} ·{' '}
-                    {Math.round(recommendation.confidence * 100)}%
-                  </p>
-                  <strong>{recommendation.summary}</strong>
-                  <p>{recommendation.action}</p>
+              ) : (
+                <div className="local-resources">
+                  {scenario.resources
+                    .filter((r) => zone?.facilityIds.includes(r.homeFacilityId))
+                    .map((r) => (
+                      <div className="unit" key={r.id}>
+                        <strong>{r.callsign}</strong>
+                        <span>{r.status.replaceAll('_', ' ')}</span>
+                      </div>
+                    ))}
+                  <small>
+                    Last known state · {lastSync}
+                    {zone?.connectivity !== 'online' ? ' · STALE' : ''}
+                  </small>
                 </div>
-                <span className={`rec-state ${recommendation.status}`}>
-                  {recommendation.status}
-                </span>
-              </article>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel timeline-panel">
-          <PanelHeader
-            kicker="05 / Live log"
-            title="World-state events"
-            badge="Deterministic feed"
-          />
-          <div className="timeline">
-            {[...scenario.events].reverse().map((event) => (
-              <div className="event" key={event.id}>
-                <time>
-                  {new Date(event.occurredAt).toLocaleTimeString([], {
-                    hour: '2-digit',
-                    minute: '2-digit'
-                  })}
-                </time>
-                <span />
-                <p>{event.message}</p>
+              )}
+            </section>
+            <section className="panel simulation-panel">
+              <Heading title="Simulation controller" aside="DEMO" />
+              <p>Trigger disasters and network failures.</p>
+              <div className="simulation-buttons">
+                <button
+                  className="flood-control"
+                  disabled={!!busy}
+                  onClick={() =>
+                    act(
+                      'Flash flood',
+                      makeCommand('scenario.trigger_flood', {
+                        intensity: 'severe',
+                        zoneIds: scenario.zones[1] ? [scenario.zones[1].id] : []
+                      })
+                    )
+                  }
+                >
+                  <b>1</b>
+                  <span>
+                    Trigger Flash Flood<small>Raise synthetic incidents in Oakland</small>
+                  </span>
+                </button>
+                <button
+                  className="bridge-control"
+                  disabled={!!busy || !bridge || bridge.status === 'closed'}
+                  onClick={() =>
+                    bridge &&
+                    act(
+                      'Bridge closure',
+                      makeCommand('route.close_bridge', { bridgeId: bridge.id, closed: true })
+                    )
+                  }
+                >
+                  <b>2</b>
+                  <span>
+                    {bridge?.status === 'closed' ? 'Bridge Closed' : 'Close a Bridge'}
+                    <small>{bridge?.name ?? 'No bridge configured'}</small>
+                  </span>
+                </button>
+                <button
+                  disabled={!!busy || !zone || zone.connectivity === 'offline'}
+                  onClick={() =>
+                    zone &&
+                    act(
+                      'Zone disconnect',
+                      makeCommand('zone.set_connectivity', {
+                        zoneId: zone.id,
+                        connectivity: 'offline'
+                      })
+                    )
+                  }
+                >
+                  <b>3</b>
+                  <span>
+                    Disconnect Zone<small>{zone?.name} · simulate network failure</small>
+                  </span>
+                </button>
+                <button
+                  className="report-control"
+                  disabled={!!busy}
+                  onClick={() => {
+                    setBody(initialReport);
+                    setEdgeTab('Field reports');
+                    requestAnimationFrame(() => document.getElementById('report')?.focus());
+                  }}
+                >
+                  <b>4</b>
+                  <span>
+                    Add Offline Report<small>Edit and submit in the edge panel</small>
+                  </span>
+                </button>
+                <button
+                  className="sync-control"
+                  disabled={!!busy || !online}
+                  onClick={() => void run('Reconnect and sync', sync)}
+                >
+                  <b>5</b>
+                  <span>
+                    Reconnect Network<small>Synchronize selected zone reports</small>
+                  </span>
+                </button>
+                <button disabled={!!busy} onClick={() => setResetOpen(true)}>
+                  <b>R</b>
+                  <span>
+                    Reset Simulation<small>Restore the seeded scenario</small>
+                  </span>
+                </button>
               </div>
-            ))}
+              <div className="action-status" aria-live="polite">
+                {busy ? `${busy}…` : notice || 'Ready · start with a flash flood'}
+              </div>
+            </section>
+            <section className="panel logs-panel" id="communications">
+              <Heading title="Communications & logs" aside={`${scenario.events.length} EVENTS`} />
+              <div className="tabs" aria-label="Event filters">
+                {['Global log', 'Selected zone', 'System'].map((t) => (
+                  <button key={t} aria-pressed={logTab === t} onClick={() => setLogTab(t)}>
+                    {t}
+                  </button>
+                ))}
+              </div>
+              <div className="timeline">
+                {[...scenario.events]
+                  .reverse()
+                  .filter(
+                    (e) =>
+                      logTab === 'Global log' ||
+                      (logTab === 'Selected zone'
+                        ? e.entityIds.some(
+                            (id) =>
+                              id === zone?.id ||
+                              zone?.incidentIds.includes(id) ||
+                              zone?.facilityIds.includes(id)
+                          )
+                        : !['incident_reported', 'report_applied'].includes(e.type))
+                  )
+                  .map((e) => (
+                    <article key={e.id}>
+                      <time>{clock(e.occurredAt)}</time>
+                      <p>{e.message}</p>
+                    </article>
+                  ))}
+                <small>End of event history · synthetic exercise</small>
+              </div>
+            </section>
           </div>
-        </section>
-      </div>
-
-      <footer>
-        <span>
-          EXERCISE ONLY — Synthetic incident, capacities, travel times, and recommendations
-        </span>
-        <span>RescueMesh v0.1</span>
-      </footer>
+          <footer>
+            <span>RescueMesh / Pittsburgh response exercise</span>
+            <span>
+              {mode === 'mock'
+                ? 'LOCAL MOCK · no backend writes'
+                : 'API MODE · server acknowledgements required'}
+            </span>
+          </footer>
+        </>
+      )}
+      {resetOpen && (
+        <div className="modal-backdrop">
+          <section
+            className="panel modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reset-title"
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setResetOpen(false);
+              if (e.key === 'Tab') {
+                const buttons = e.currentTarget.querySelectorAll('button');
+                const first = buttons[0];
+                const last = buttons[buttons.length - 1];
+                if (e.shiftKey && document.activeElement === first) {
+                  e.preventDefault();
+                  last?.focus();
+                } else if (!e.shiftKey && document.activeElement === last) {
+                  e.preventDefault();
+                  first?.focus();
+                }
+              }
+            }}
+          >
+            <h2 id="reset-title">Reset this exercise?</h2>
+            <p>
+              Restore the seed, clear proposed plans and remove {queue.length} locally queued
+              report(s) from {mode} mode.
+            </p>
+            <div>
+              <button autoFocus onClick={() => setResetOpen(false)}>
+                Keep scenario
+              </button>
+              <button
+                className="danger"
+                onClick={() => {
+                  setResetOpen(false);
+                  void run('Scenario reset', async () => {
+                    await send(makeCommand('scenario.reset', {}));
+                    saveQueue([]);
+                    setSelected('');
+                    setBody(initialReport);
+                  });
+                }}
+              >
+                Reset scenario
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }
-
-function PanelHeader({ kicker, title, badge }: { kicker: string; title: string; badge: string }) {
+function Heading({ title, aside }: { title: string; aside: string }) {
   return (
-    <header className="panel-header">
-      <div>
-        <p className="eyebrow">{kicker}</p>
-        <h2>{title}</h2>
-      </div>
-      <span className="badge">{badge}</span>
+    <header className="panel-heading">
+      <h2>{title}</h2>
+      <span>{aside}</span>
     </header>
   );
 }
-
-function Summary({ label, value, accent }: { label: string; value: string; accent: string }) {
+function Metric({ value, label, color }: { value: ReactNode; label: string; color: string }) {
   return (
-    <div className={`summary ${accent}`}>
+    <div className={`metric ${color}`}>
+      <strong>{value}</strong>
       <span>{label}</span>
+    </div>
+  );
+}
+function Forecast({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div>
+      <small>{label}</small>
       <strong>{value}</strong>
     </div>
   );
