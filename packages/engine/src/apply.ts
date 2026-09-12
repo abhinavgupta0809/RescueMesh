@@ -1,24 +1,31 @@
 import {
   checkInvariants,
-  type Command,
+  validateScriptedBatch,
+  type EngineCommand,
   type CommandError,
   type CommandErrorCode,
   type CommandFailure,
   type CommandResponse,
-  type CommandResultMap,
   type CommandSuccess,
   type CommandType,
+  type EngineCommandType,
+  type EngineCommandResultMap,
   type FieldReport,
   type Incident,
   type ResourcePlan,
   type Severity,
   type WorldStateEvent,
   type WorldStateEventType,
-  type Zone
+  type Zone,
+  type AppliedDevelopment,
+  type ScriptedEvent
 } from '@rescuemesh/shared';
 import { allocate, isReachable } from './allocator.js';
 import { nextId, type EngineState } from './state.js';
 import type { Clock, Rng } from './determinism.js';
+
+/** Recorded, not generated. Surfaced so the UI never mislabels it as AI output. */
+export const SCRIPT_SOURCE_VERSION = 'recorded-pittsburgh-sequence-v1';
 
 export interface ApplyContext {
   clock: Clock;
@@ -46,12 +53,14 @@ const ERROR_RETRYABLE: Record<CommandErrorCode, boolean> = {
   plan_not_proposed: false,
   infeasible: false,
   provider_unavailable: true,
+  scenario_batch_stale: true,
+  no_acceptable_developments: false,
   internal_error: true
 };
 
 const fail = (
   state: EngineState,
-  command: { commandId: string; type: CommandType },
+  command: { commandId: string; type: EngineCommandType },
   code: CommandErrorCode,
   message: string,
   details?: Record<string, unknown>
@@ -134,7 +143,7 @@ const titleFromReport = (body: string): string => {
 
 export const applyCommand = (
   previous: EngineState,
-  command: Command,
+  command: EngineCommand,
   ctx: ApplyContext
 ): ApplyResult => {
   // Command deduplication: a replayed commandId returns its original result and
@@ -170,7 +179,8 @@ export const applyCommand = (
     appliedCommands: { ...previous.appliedCommands },
     appliedReports: { ...previous.appliedReports },
     counters: { ...previous.counters },
-    bridgeRouteMemory: structuredClone(previous.bridgeRouteMemory)
+    bridgeRouteMemory: structuredClone(previous.bridgeRouteMemory),
+    appliedScriptBatches: { ...previous.appliedScriptBatches }
   };
   const revision = previous.scenario.revision + 1;
   const events: WorldStateEvent[] = [];
@@ -221,7 +231,7 @@ export const applyCommand = (
     duplicate: false,
     data: outcome.data,
     events
-  } as CommandSuccess<CommandType>;
+  } as unknown as CommandSuccess<CommandType>;
   // The reset command is deliberately not recorded: it clears the dedup ledger,
   // so recording it would leave exactly one stale entry behind.
   if (!isReset) draft.appliedCommands[command.commandId] = response;
@@ -231,7 +241,7 @@ export const applyCommand = (
 type Emit = (type: WorldStateEventType, message: string, entityIds: string[]) => void;
 
 type RouteOutcome =
-  | { ok: true; data: CommandResultMap[CommandType] }
+  | { ok: true; data: EngineCommandResultMap[EngineCommandType] }
   | { ok: false; code: CommandErrorCode; message: string; details?: Record<string, unknown> };
 
 const reject = (
@@ -242,7 +252,7 @@ const reject = (
 
 const route = (
   draft: EngineState,
-  command: Command,
+  command: EngineCommand,
   ctx: ApplyContext,
   emit: Emit
 ): RouteOutcome => {
@@ -598,6 +608,79 @@ const route = (
       return { ok: true, data: { plan: structuredClone(plan), assignedResourceIds } };
     }
 
+    case 'scenario.advance': {
+      const { batchId, basedOnRevision, step, rationale, assumptions, developments } =
+        command.payload;
+      if (!batchId || typeof batchId !== 'string') {
+        return reject('validation_failed', 'batchId is required');
+      }
+      if (draft.appliedScriptBatches[batchId]) {
+        return reject('scenario_batch_stale', `scenario batch ${batchId} was already applied`);
+      }
+
+      const validation = validateScriptedBatch(
+        { batchId, basedOnRevision, step, rationale, assumptions, developments },
+        scenario,
+        { appliedBatchIds: Object.keys(draft.appliedScriptBatches) }
+      );
+      if (validation.batchError) {
+        const code =
+          validation.batchError.code === 'invalid_batch'
+            ? 'validation_failed'
+            : 'scenario_batch_stale';
+        return reject(code, validation.batchError.reason, { batchError: validation.batchError });
+      }
+      if (validation.accepted.length === 0) {
+        return reject(
+          'no_acceptable_developments',
+          'no development in this scenario step survived validation',
+          { rejected: validation.rejected }
+        );
+      }
+
+      const applied: AppliedDevelopment[] = [];
+      for (const development of validation.accepted) {
+        const outcome = applyDevelopment(draft, development, ctx, emit);
+        if (outcome) applied.push(outcome);
+      }
+
+      let phase = scenario.phase;
+      for (const development of validation.accepted) {
+        if (development.kind === 'scenario.phase') phase = development.phase;
+      }
+      scenario.phase = phase;
+      draft.appliedScriptBatches[batchId] = true;
+
+      emit(
+        'scenario_step_applied',
+        `Recorded scenario step "${step}": ${applied.length} development(s) applied` +
+          (validation.rejected.length > 0 ? `, ${validation.rejected.length} refused` : '') +
+          '. Fictional exercise content from the deterministic script.',
+        [batchId]
+      );
+      for (const refusal of validation.rejected) {
+        emit(
+          'scenario_development_refused',
+          `Refused ${String((refusal.proposal as { kind?: string }).kind ?? 'development')}: ${refusal.code} — ${refusal.reason}`,
+          [batchId]
+        );
+      }
+
+      return {
+        ok: true,
+        data: {
+          batchId,
+          step,
+          source: { kind: 'scripted' as const, version: SCRIPT_SOURCE_VERSION },
+          rationale,
+          assumptions,
+          applied,
+          rejected: validation.rejected,
+          phase
+        }
+      };
+    }
+
     case 'scenario.reset': {
       // Emit before clearing, so the event's id counter is cleared with the rest.
       emit('scenario_reset', 'Scenario reset to the seeded exercise state.', [scenario.id]);
@@ -607,6 +690,7 @@ const route = (
       draft.appliedReports = {};
       draft.counters = {};
       draft.bridgeRouteMemory = {};
+      draft.appliedScriptBatches = {};
       return { ok: true, data: { scenario: structuredClone(draft.scenario) } };
     }
 
@@ -683,4 +767,186 @@ const rejectReport = (
   if (index >= 0) draft.scenario.reports[index] = record;
   else draft.scenario.reports.push(record);
   return structuredClone(record);
+};
+
+/**
+ * Applies one validated development. Every entity this creates gets an
+ * engine-generated id: the script only ever supplies a localRef, so it can
+ * neither collide with nor impersonate an existing entity.
+ */
+const applyDevelopment = (
+  draft: EngineState,
+  proposal: ScriptedEvent,
+  ctx: ApplyContext,
+  emit: Emit
+): AppliedDevelopment | undefined => {
+  const scenario = draft.scenario;
+
+  switch (proposal.kind) {
+    case 'incident.raise': {
+      const zone = scenario.zones.find((z) => z.id === proposal.zoneId);
+      const anchor = scenario.facilities.find((f) => f.id === zone?.facilityIds[0]);
+      const incident: Incident = {
+        id: nextId(draft, 'inc-scr'),
+        title: proposal.title,
+        description: `${proposal.description} (fictional exercise development)`,
+        severity: proposal.severity,
+        location: { lat: anchor?.location.lat ?? 40.44, lng: anchor?.location.lng ?? -79.99 },
+        address: `${zone?.name ?? 'Unknown zone'} — modeled location`,
+        reportedAt: ctx.clock.now(),
+        status: 'active',
+        peopleAtRisk: proposal.peopleAtRisk,
+        requiredCapabilities: [...proposal.requiredCapabilities]
+      };
+      scenario.incidents.push(incident);
+      zone?.incidentIds.push(incident.id);
+      emit('incident_reported', `Scripted development raised ${incident.title} (modeled).`, [
+        incident.id
+      ]);
+      return {
+        kind: proposal.kind,
+        summary: `Raised ${incident.id}: ${incident.title} (${incident.severity})`,
+        createdEntityId: { localRef: proposal.localRef, id: incident.id }
+      };
+    }
+    case 'incident.escalate': {
+      const incident = scenario.incidents.find((i) => i.id === proposal.incidentId);
+      if (!incident) return undefined;
+      const from = incident.severity;
+      incident.severity = proposal.toSeverity;
+      if (proposal.peopleAtRiskDelta) incident.peopleAtRisk += proposal.peopleAtRiskDelta;
+      emit(
+        'incident_reported',
+        `Scripted development escalated ${incident.id}: ${from} -> ${incident.severity} (modeled).`,
+        [incident.id]
+      );
+      return {
+        kind: proposal.kind,
+        summary: `Escalated ${incident.id} from ${from} to ${incident.severity}`
+      };
+    }
+    case 'incident.stabilize': {
+      const incident = scenario.incidents.find((i) => i.id === proposal.incidentId);
+      if (!incident) return undefined;
+      const parts: string[] = [];
+      if (proposal.toSeverity) {
+        parts.push(`${incident.severity} -> ${proposal.toSeverity}`);
+        incident.severity = proposal.toSeverity;
+      }
+      if (proposal.toStatus) {
+        parts.push(`status ${incident.status} -> ${proposal.toStatus}`);
+        incident.status = proposal.toStatus;
+      }
+      emit(
+        'incident_reported',
+        `Scripted development stabilized ${incident.id}: ${parts.join(', ')} (modeled).`,
+        [incident.id]
+      );
+      return { kind: proposal.kind, summary: `Stabilized ${incident.id}: ${parts.join(', ')}` };
+    }
+    case 'report.inject': {
+      const zone = scenario.zones.find((z) => z.id === proposal.zoneId);
+      const clientReportId = nextId(draft, 'rep-scr');
+      // An offline zone queues it, exactly as a real device would.
+      if (zone?.connectivity === 'offline') {
+        scenario.reports.push({
+          clientReportId,
+          zoneId: proposal.zoneId,
+          body: proposal.body,
+          capturedAt: ctx.clock.now(),
+          syncState: 'queued'
+        });
+        emit(
+          'report_queued',
+          `Scripted development injected a field report into offline ${zone.name}; queued, not yet central (modeled).`,
+          [clientReportId]
+        );
+        return {
+          kind: proposal.kind,
+          summary: `Queued report ${clientReportId} in offline ${proposal.zoneId}`,
+          createdEntityId: { localRef: proposal.localRef, id: clientReportId }
+        };
+      }
+      const record = applyReport(
+        draft,
+        {
+          clientReportId,
+          zoneId: proposal.zoneId,
+          body: proposal.body,
+          capturedAt: ctx.clock.now()
+        },
+        ctx,
+        emit
+      );
+      return {
+        kind: proposal.kind,
+        summary: `Applied report ${clientReportId} as ${record.incidentId ?? 'an incident'}`,
+        createdEntityId: { localRef: proposal.localRef, id: clientReportId }
+      };
+    }
+    case 'route.restrict': {
+      const route = scenario.routes.find((r) => r.id === proposal.routeId);
+      if (!route) return undefined;
+      const from = route.status;
+      route.status = proposal.status;
+      emit(
+        'road_changed',
+        `Scripted development set ${route.id} ${from} -> ${route.status} (modeled).`,
+        [route.id]
+      );
+      return { kind: proposal.kind, summary: `Route ${route.id} ${from} -> ${route.status}` };
+    }
+    case 'route.restore': {
+      const route = scenario.routes.find((r) => r.id === proposal.routeId);
+      if (!route) return undefined;
+      const from = route.status;
+      route.status = 'open';
+      emit('road_changed', `Scripted development reopened ${route.id} (was ${from}, modeled).`, [
+        route.id
+      ]);
+      return { kind: proposal.kind, summary: `Route ${route.id} reopened from ${from}` };
+    }
+    case 'facility.demand': {
+      const facility = scenario.facilities.find((f) => f.id === proposal.facilityId);
+      if (!facility) return undefined;
+      const from = facility.currentLoad;
+      // Clamped as a belt-and-braces guard; validation already refused overflow.
+      facility.currentLoad = Math.min(
+        facility.syntheticCapacity,
+        Math.max(0, facility.currentLoad + proposal.loadDelta)
+      );
+      emit(
+        'facility_updated',
+        `Scripted development moved modeled demand at ${facility.id}: ${from} -> ${facility.currentLoad} of ${facility.syntheticCapacity}.`,
+        [facility.id]
+      );
+      return {
+        kind: proposal.kind,
+        summary: `${facility.id} modeled load ${from} -> ${facility.currentLoad} of ${facility.syntheticCapacity}`
+      };
+    }
+    case 'resource.delay': {
+      const resource = scenario.resources.find((r) => r.id === proposal.resourceId);
+      if (!resource) return undefined;
+      // Only an available unit reaches here, so no assignment is disturbed.
+      resource.status = 'offline';
+      emit(
+        'resource_dispatched',
+        `Scripted development delayed ${resource.callsign} by a modeled ${proposal.delayMinutes} min: ${proposal.reason}.`,
+        [resource.id]
+      );
+      return {
+        kind: proposal.kind,
+        summary: `${resource.callsign} delayed ~${proposal.delayMinutes} min (${proposal.reason})`
+      };
+    }
+    case 'scenario.phase': {
+      emit(
+        'facility_updated',
+        `Scripted development marked the exercise ${proposal.phase}: ${proposal.note}`,
+        [scenario.id]
+      );
+      return { kind: proposal.kind, summary: `Phase -> ${proposal.phase}: ${proposal.note}` };
+    }
+  }
 };

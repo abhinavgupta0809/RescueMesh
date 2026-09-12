@@ -76,22 +76,23 @@ Implement an allocation adapter as a small Python service or child process only 
 
 ## Optional edge track
 
-An on-device IFM model is a stretch goal after the hosted flow is reliable. Limit it to offline classification or summarization of field reports behind `EdgeIntelligenceAdapter`; do not attempt peer-to-peer networking or distributed consensus during the hackathon.
+Dropped for this submission. K2/IFM is reserved for a separate Vault Ledger submission and has no runtime role in RescueMesh. `EdgeIntelligenceAdapter` remains a mock returning an offline-ready flag.
 
 ## Suggested ownership
 
 | Workstream                                          | Primary surface               | Owner      |
 | --------------------------------------------------- | ----------------------------- | ---------- |
 | Command-center frontend                             | `apps/web`                    | Codex      |
-| Simulation engine and deterministic behaviour       | `packages/engine`             | K2         |
+| Simulation engine and deterministic behaviour       | `packages/engine`             | Claude     |
 | Five in-app AI chiefs                               | `apps/api/src/adapters`       | Gemini     |
 | Shared contracts, backend integration, verification | `packages/shared`, `apps/api` | Claude     |
 | OR-Tools optimizer (later)                          | isolated service              | unassigned |
 | Map and route integration (later)                   | geography adapter             | unassigned |
 
-**K2 owns the simulation engine** — it builds and maintains the deterministic
-simulation code. No runtime state transition calls a hosted model. **Gemini
-provides advisory reasoning only** and never mutates world state.
+**The deterministic engine is the sole authority for simulation state.** No
+runtime state transition calls any model. **Gemini provides advisory
+reasoning only** and reaches state solely through operator approval, which the
+engine then validates. **K2/IFM has no runtime role.**
 
 ## Scope guardrails
 

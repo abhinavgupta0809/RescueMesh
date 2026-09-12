@@ -3,6 +3,7 @@ import {
   isCommandType,
   pittsburghFloodScenario,
   type Command,
+  type EngineCommand,
   type CommandErrorCode,
   type CommandResponse,
   type Scenario,
@@ -31,7 +32,7 @@ export class World {
     return this.engine.revision;
   }
 
-  execute(command: Command): CommandResponse {
+  execute(command: EngineCommand): CommandResponse {
     return this.engine.execute(command);
   }
 
@@ -77,6 +78,8 @@ export const HTTP_STATUS_BY_ERROR: Record<CommandErrorCode, number> = {
   resource_unavailable: 422,
   route_closed: 422,
   provider_unavailable: 503,
+  scenario_batch_stale: 409,
+  no_acceptable_developments: 422,
   internal_error: 500
 };
 

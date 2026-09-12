@@ -62,4 +62,23 @@ export class RecommendationCache {
     this.entry = undefined;
     this.inFlight = undefined;
   }
+
+  /** Looks up one cached recommendation by id, without computing anything. */
+  find(
+    recommendationId: string
+  ): { item: RecommendationsResponse['items'][number]; revision: number } | undefined {
+    if (!this.entry) return undefined;
+    const item = this.entry.response.items.find(
+      (candidate) => candidate.recommendation.id === recommendationId
+    );
+    return item ? { item, revision: this.entry.revision } : undefined;
+  }
+
+  /** Records the operator's decision so a recommendation cannot be re-executed. */
+  resolve(recommendationId: string, status: 'accepted' | 'dismissed'): void {
+    const found = this.entry?.response.items.find(
+      (candidate) => candidate.recommendation.id === recommendationId
+    );
+    if (found) found.recommendation.status = status;
+  }
 }

@@ -1,254 +1,190 @@
 # RescueMesh Implementation Contract
 
-Owner: shared contracts and integration (Claude). Source of truth for the eight-step interactive demo.
+Authoritative description of the final architecture. Where an implementation disagrees with this document, the implementation is wrong — raise it rather than diverging.
 
-This document and `packages/shared` move together. If an implementation disagrees with this file, the implementation is wrong — raise the conflict rather than diverging. Types referenced here live in `packages/shared/src/types.ts`, `commands.ts`, `invariants.ts`, and `wire.ts`; the invariants in §6 are executable as `checkInvariants(scenario)`.
+Types live in `packages/shared/src/`: `types.ts`, `commands.ts`, `invariants.ts`, `scripted-scenario.ts`, `wire.ts`. The invariants in §10 are executable as `checkInvariants(scenario)`.
 
-> **Exercise only.** Every capacity, incident, routing estimate, and impact forecast in this contract is synthetic. Nothing here is an emergency service, a dispatch system, or operational guidance.
+> **Exercise only.** Every capacity, incident, travel estimate, connectivity state, and impact forecast here is synthetic. RescueMesh is not an emergency service, not a dispatch system, and not a source of operational guidance. It does not predict real flooding.
 
-## 1. Scope
+## 0. The three components
 
-In scope for this milestone: an in-memory backend, HTTP polling, browser-local persistence for the offline queue, and deterministic mock adapters. Out of scope: a database, websockets, authentication, live GIS, autonomous approval, and any external service that is not optional behind an adapter.
+| Component                                    | Role                                                     |
+| -------------------------------------------- | -------------------------------------------------------- |
+| `packages/engine` (deterministic TypeScript) | **Sole authority for simulation state**                  |
+| Gemini                                       | **Five advisory chiefs** — analysis and proposed actions |
+| `apps/web`                                   | Operator interface (owned by Codex)                      |
 
-The demo is exactly these eight steps, in this order:
+**K2/IFM has no runtime role.** No RescueMesh request path reads an IFM credential or calls IFM. The client under `apps/api/src/adapters/ifm.ts` and `apps/api/src/scripts/` is standalone development tooling reserved for a separate Vault Ledger submission; the demo runs with `IFM_API_KEY` empty.
 
-| #   | Step                                     | Command                                 |
-| --- | ---------------------------------------- | --------------------------------------- |
-| 1   | Trigger a flash flood                    | `scenario.trigger_flood`                |
-| 2   | Close a bridge                           | `route.close_bridge`                    |
-| 3   | Disconnect a zone                        | `zone.set_connectivity`                 |
-| 4   | Submit and queue an offline field report | `report.submit`                         |
-| 5   | Reconnect, then apply queued reports     | `zone.set_connectivity` → `report.sync` |
-| 6   | Generate a proposed resource plan        | `plan.propose`                          |
-| 7   | Approve the plan                         | `plan.approve`                          |
-| 8   | Reset to the seeded scenario             | `scenario.reset`                        |
+Claude and Codex are development tools. Neither is a runtime component.
 
-## 2. Three state machines, kept separate
+## 1. Engine ownership
 
-The demo is confusing unless these three are never conflated. They are stored on different records and change through different commands.
+The engine is the only writer of world state. It owns:
 
-### 2.1 Connectivity state — `Zone.connectivity`
+- **Incidents** — creation, severity, status, people at risk
+- **Simulated time** — the scenario clock, driven by an injected `Clock`; never wall-clock, and never advanced by model latency
+- **Resources** — status, crew, capability, and every assignment
+- **Routes and bridges** — status, and the modeled travel times used for planning
+- **Zone connectivity** — online, degraded, offline
+- **Report queues** — offline capture, sync state, exactly-once reconciliation
+- **Dispatch** — resource plans, approval, and the transition to `assigned`
+- **Reconciliation** — applying queued reports exactly once on reconnection
+- **Reset** — restoring the seed and clearing every ledger
 
-Whether a zone can reach the command center. Per zone, not global.
+No route handler mutates the scenario. Every change is one `Command` applied through `applyCommand`, which re-checks all invariants and rejects the command whole if any would break.
+
+## 2. Scenario progression
+
+**No LLM is required to advance the scenario.** Two mechanisms, both deterministic:
+
+**Operator controls** — the eight typed commands in §4: `scenario.trigger_flood`, `route.close_bridge`, `zone.set_connectivity`, `report.submit`, `report.sync`, `plan.propose`, `plan.approve`, `scenario.reset`.
+
+**Recorded scenario script** — `POST /api/scenario/advance` applies one named step of a hand-authored deterministic script (`apps/api/src/scenario/script.ts`), via the `scenario.advance` command:
+
+| Step                     | What it develops                                   |
+| ------------------------ | -------------------------------------------------- |
+| `initial_flooding`       | New incident, an existing one worsens              |
+| `bridge_disruption`      | A crossing closes, hospital demand shifts          |
+| `evacuation_pressure`    | Modeled demand rises, a call becomes critical      |
+| `zone_connectivity_loss` | A report is captured offline, a supply run is held |
+| `response_adaptation`    | Access improves, demand flattens                   |
+| `stabilization`          | Incidents downgrade, the exercise closes           |
+
+The script is authored TypeScript. The same step from the same revision always produces the same developments; it needs no network, no credentials, and no budget. Reset and replay never call anything external.
+
+Script developments are bounded and validated exactly like any other input: at most three per step, only existing entity ids, no resource creation, no assignment, no travel times. New entities carry a `localRef` and **the engine generates the real id**.
+
+## 3. Gemini ownership
+
+Gemini powers five advisory chiefs — Incident Commander, Medical Chief, Police Chief, Rescue Chief, Logistics Chief. Each:
+
+- Receives a **role-scoped slice of the current engine snapshot** (`roleContext`), not the whole scenario.
+- Returns a summary, a concrete action, a confidence in 0–1, optionally a related incident id, and optionally a **bounded proposed action** (§4).
+- Is **advisory**. Its output is a `pending` recommendation and changes nothing on its own.
+
+Validation before any output is surfaced: severities must match the domain enum, incident ids are checked against the scenario and dropped if invented, and confidence is clamped.
+
+## 4. Approval boundary
+
+**Gemini must never directly mutate state.** The only path from advice to a state change:
 
 ```
-online ──disconnect──> offline ──reconnect──> online
-   └────degrade────> degraded ────────────────┘
+chief recommendation (pending, carries analyzedRevision)
+   → operator approves via POST /api/recommendations/approve
+   → backend maps proposedAction to an EXISTING engine command
+   → engine validates it like any operator command
 ```
 
-| From       | To         | Trigger                            |
-| ---------- | ---------- | ---------------------------------- |
-| `online`   | `degraded` | `zone.set_connectivity` (degraded) |
-| `online`   | `offline`  | `zone.set_connectivity` (offline)  |
-| `degraded` | `offline`  | `zone.set_connectivity` (offline)  |
-| `degraded` | `online`   | `zone.set_connectivity` (online)   |
-| `offline`  | `online`   | `zone.set_connectivity` (online)   |
-
-`degraded` accepts writes but the client must label the data stale. `offline` accepts a `report.submit` but only _queues_ it — `queuedOffline: true`, no incident raised until `report.sync`. Other writes from that zone are rejected with `zone_offline`. Setting a zone to the connectivity it already has is a no-op success with `duplicate: false` and no event.
-
-The **client's own** online/offline state is browser-local and is not server state. The client decides to queue; the server decides whether a report is accepted.
-
-### 2.2 Report synchronization state — `FieldReport.syncState`
-
-```
-queued ──sync──> pending ──┬──> applied
-                           ├──> duplicate
-                           └──> rejected
-```
-
-| State       | Meaning                                                                  |
-| ----------- | ------------------------------------------------------------------------ |
-| `queued`    | Held on the device. Browser-local only; the server has never seen it.    |
-| `pending`   | Received by the server, not yet turned into an incident draft.           |
-| `applied`   | Became an incident draft. `appliedAt` and `incidentId` are set.          |
-| `duplicate` | Its `clientReportId` was already applied. Nothing changed. Not an error. |
-| `rejected`  | Failed validation. `rejectionReason` is set. Terminal.                   |
-
-`clientReportId` is generated on the device and is the idempotency key. It is the only thing that makes step 5 exactly-once.
-
-### 2.3 Resource assignment state
-
-Two coupled records. A plan is the reviewable unit; a resource is the scarce thing.
-
-```
-ResourcePlan:  proposed ──approve──> approved
-                   │
-                   └──(a newer plan is proposed)──> superseded
-
-Resource:      available ──plan approved──> assigned ──dispatch──> en_route ──> available
-```
-
-| `Assignment.status` | Holds the unit? | Set by                         |
-| ------------------- | --------------- | ------------------------------ |
-| `proposed`          | No              | `plan.propose`                 |
-| `approved`          | Yes             | `plan.approve`                 |
-| `dispatched`        | Yes             | seed, or a later dispatch step |
-| `complete`          | No              | a later completion step        |
-
-A proposed plan reserves nothing. Only `plan.approve` moves resources to `assigned`. This is what makes double-booking preventable: the check happens once, at approval, against live state.
-
-## 3. Commands
-
-All eight go to one endpoint. `POST /api/commands` with a `Command` envelope; the response is a `CommandResponse`.
+The approvable set is deliberately narrow. Today it is exactly one member:
 
 ```ts
-interface CommandEnvelope<TType, TPayload> {
-  type: TType;
-  commandId: string; // idempotency key, client-generated (uuid)
-  issuedAt: string; // ISO 8601
-  expectedRevision?: number; // optional optimistic concurrency
-  payload: TPayload;
-}
+type ApprovableAction = {
+  kind: 'plan.propose';
+  incidentIds?: string[];
+  reserveUnitsPerKind?: number;
+};
 ```
 
-`commandId` makes **every** command idempotent, not just report sync. Replaying a `commandId` returns the original result with `duplicate: true`, no new events, and an unchanged revision.
+Approval cannot invent a capability the engine lacks. A recommendation with no `proposedAction` is advisory-only: approving it is refused with `advisory_only`, and the operator acts through the normal controls instead.
 
-### 3.1 Transition table
+Refusal codes: `not_found`, `stale_recommendation`, `advisory_only`, `already_resolved`. HTTP `404` for not found, `409` for the rest, and the engine's own status codes when the derived command itself fails.
 
-| Command                  | Preconditions                                                                    | Effect                                                                                                           | Events                                                  |
-| ------------------------ | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| `scenario.trigger_flood` | `zoneIds` exist (absent means all zones)                                         | Raises synthetic incidents in the named zones, sets `status: 'active'`, may downgrade route status to `slow`     | `flood_triggered`, one `incident_reported` per incident |
-| `route.close_bridge`     | `bridgeId` exists; `closed` differs from current status                          | Sets the bridge status and forces every route in `routeIds` to `closed` (reopen restores `open`)                 | `bridge_closed`, one `road_changed` per route           |
-| `zone.set_connectivity`  | `zoneId` exists                                                                  | Sets `connectivity` and `connectivityChangedAt`                                                                  | `zone_connectivity_changed`                             |
-| `report.submit`          | `zoneId` exists; `body` is 1–4000 chars                                          | Zone `offline` → store as `queued`, raising **no** incident (`queuedOffline: true`). Otherwise apply immediately | `report_queued` or `report_applied`                     |
-| `report.sync`            | Every `zoneId` exists                                                            | Applies each report in order, skipping any `clientReportId` already applied                                      | one `report_applied` per newly applied report           |
-| `plan.propose`           | At least one active incident; at least one available unit                        | Builds a `proposed` plan, marks any previously `proposed` plan `superseded`. Reserves nothing                    | `plan_proposed`                                         |
-| `plan.approve`           | Plan exists and is `proposed`; `basedOnRevision` still current; no unit conflict | Sets plan `approved`, assignments `approved`, resources `assigned`                                               | `plan_approved`, one `resource_dispatched` per unit     |
-| `scenario.reset`         | none                                                                             | Replaces all state with a fresh clone of the seed; `revision` returns to `0`; clears the server report log       | `scenario_reset`                                        |
+Resource dispatch still requires the existing `plan.approve` command. Approving a chief's advice at most produces a _proposed_ plan for the operator to review.
 
-### 3.2 Response shapes
+## 5. Revision handling
 
-```ts
-interface CommandSuccess<TType> {
-  ok: true;
-  commandId: string;
-  type: TType;
-  revision: number; // after applying; unchanged when duplicate
-  appliedAt: string;
-  duplicate: boolean; // true when this commandId was already applied
-  data: CommandResultMap[TType];
-  events: WorldStateEvent[]; // appended by this command; empty when duplicate
-}
+Every recommendation carries `analyzedRevision`: the scenario revision it was computed from. `RecommendationsResponse` carries the revision and whether it was served from cache.
 
-interface CommandFailure {
-  ok: false;
-  commandId: string;
-  type: CommandType | 'unknown';
-  revision: number; // never advances on failure
-  error: { code: CommandErrorCode; message: string; retryable: boolean; details?: object };
-}
-```
+An approval is refused as `stale_recommendation` unless **both** the revision the operator saw and the revision the advice analyzed still equal the current revision. A stale approval must be revalidated — the operator re-reads the chiefs at the current revision — before it can execute.
 
-HTTP status is `200` for `ok: true`, `400` for `validation_failed` / `unknown_command`, `404` for `not_found`, `409` for `revision_conflict` / `resource_double_booked` / `plan_stale` / `plan_not_proposed` / `bridge_already_in_state`, `422` for `infeasible` / `zone_offline` / `resource_unavailable` / `route_closed`, `503` for `provider_unavailable`, `500` for `internal_error`. The body is always a `CommandResponse` — never a bare string or an HTML error page.
+Any command that advances the revision invalidates cached advice, so stale advice cannot be approved by accident. Advice is memoised per revision, so repeated UI polling makes no model calls.
 
-### 3.3 Error codes
+## 6. Offline behavior
 
-| Code                      | Retryable | When                                                        |
-| ------------------------- | --------- | ----------------------------------------------------------- |
-| `validation_failed`       | no        | Payload shape or field bounds wrong                         |
-| `unknown_command`         | no        | `type` is not one of the eight                              |
-| `not_found`               | no        | A referenced id does not exist                              |
-| `revision_conflict`       | yes       | `expectedRevision` no longer matches                        |
-| `zone_offline`            | yes       | The target zone cannot accept writes — **queue locally**    |
-| `bridge_already_in_state` | no        | Closing a closed bridge, or opening an open one             |
-| `resource_unavailable`    | yes       | A required unit is not `available`                          |
-| `resource_double_booked`  | no        | Approval would give one unit two active assignments         |
-| `route_closed`            | no        | The only route to the incident is closed                    |
-| `plan_stale`              | yes       | World state moved past the plan's `basedOnRevision`         |
-| `plan_not_proposed`       | no        | Approving a plan that is already approved or superseded     |
-| `infeasible`              | no        | No plan satisfies the required capabilities                 |
-| `provider_unavailable`    | yes       | An optional external adapter failed and no mock could cover |
-| `internal_error`          | yes       | Unexpected; must still return a `CommandResponse`           |
+Unchanged, and deliberately independent of any model:
 
-## 4. Read endpoints
+- A device captures a report with a client-generated `clientReportId`.
+- While its zone is `offline`, the report is **queued** and raises no incident.
+- On reconnection, `report.sync` applies each report **exactly once**, keyed on `clientReportId`. Retries return duplicates and add no incidents and no events.
 
-| Endpoint                           | Returns                                                        |
-| ---------------------------------- | -------------------------------------------------------------- |
-| `GET /health`                      | `HealthResponse` — active reasoning provider and model         |
-| `GET /api/scenario`                | `Scenario` — full current state                                |
-| `GET /api/world-state?since=<rev>` | `WorldStateResponse` — only events after `<rev>`               |
-| `GET /api/recommendations`         | Five `RecommendationResponse` items, each with provenance      |
-| `GET /api/recommendations/:role`   | One `RecommendationResponse`                                   |
-| `POST /api/reports/parse`          | `ParseReportResponse` — one report to a draft, with provenance |
+**Gemini does not run offline.** When cloud reasoning is unavailable, the chiefs fall back to the deterministic mock, which is clearly labelled `provider: 'mock'` with `degraded: true` and the reason. That is a labelled fallback, not offline AI.
 
-Polling: the client keeps the last `revision` it saw and polls `GET /api/world-state?since=<revision>` every 2–5 seconds. `upToDate: true` means nothing changed. A `since` older than the server's event window returns the full `scenario` instead of a delta.
+## 7. Credentials
 
-## 4a. Runtime flow
+`GEMINI_API_KEY` is read **server-side only**, sent as a request header, and never returned in a response body or written to a log. `apps/web` references no model credential and makes no model call.
 
-1. The UI submits a typed command to `POST /api/commands`.
-2. The simulation engine validates and applies it. It is the only writer.
-3. The backend exposes the authoritative scenario and events.
-4. Gemini chiefs analyze a role-scoped slice of that scenario and return validated advice.
-5. The user reviews a proposed plan.
-6. Approval returns through the engine, which re-checks live state before assigning resources.
+No IFM credential and no K2 request is required to run RescueMesh. With `GEMINI_API_KEY` empty the whole demo still runs on deterministic mocks.
 
-## 5. Provenance and mock visibility
+## 8. Provenance
 
-Every reasoning result carries a `ReasoningSource`, plus the revision it analyzed:
+Every reasoning result carries:
 
 ```ts
 { provider: 'gemini' | 'mock', model: string, degraded: boolean, warning?: string }
 ```
 
-`RecommendationResponse.analyzedRevision` names the scenario revision the advice
-was computed against; advice older than the current revision is stale. Advice is
-memoised per revision, so repeated polling makes no model calls, and a command
-retires the cache. `provider: 'ifm'` remains in the union for the retained
-development tooling and is never used for chiefs.
+- `provider: 'gemini'`, `degraded: false` — a live Gemini response.
+- `provider: 'mock'`, `degraded: true` — Gemini was configured, tried, and failed; `warning` says why.
+- `provider: 'mock'`, `degraded: false` — no Gemini key; deterministic fixture by configuration.
 
-- `degraded: true` means a live provider was configured and tried, and the deterministic mock answered instead. `warning` carries the reason.
-- The interface must show the provider on every card that came from a model. A judge should never have to guess whether an answer was generated or seeded.
-- Model output never mutates world state directly. Severities must match the domain enum, referenced ids are checked against the scenario, confidence is clamped to 0–1, and unknown ids are dropped.
-- Recommendations stay `pending` until a human accepts them.
+The interface must show the provider on every card produced by reasoning.
 
-External services stay optional. Absent credentials must never break the demo: the deterministic mock path is always available and always labelled.
+**Recorded scenario content is never labelled as AI generation.** `scenario.advance` returns `source: { kind: 'scripted', version }` and carries no provider field. The script is authored deterministic content and must be presented as such.
 
-## 6. Invariants
+## 9. API and type compatibility
 
-Executable as `checkInvariants(scenario): InvariantViolation[]`, which must return `[]` after every command. `assertInvariants(scenario)` throws with all violations listed.
+Public contracts are preserved. Changes made in this pass, for Codex to adapt to:
 
-| Id  | Invariant                                                                                                                                                                |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| I1  | Exactly 3 hospitals, at least 3 fire houses, exactly 2 police hubs, exactly 2 rescue centers                                                                             |
-| I2  | No unit is held by more than one active (`approved` or `dispatched`) assignment                                                                                          |
-| I3  | A held unit is not `available`; a unit marked `assigned` holds exactly one active assignment                                                                             |
-| I4  | Every referenced incident, resource, and facility id exists — in assignments and in plans                                                                                |
-| I5  | No **proposed** plan routes a unit over a `closed` route. An already-dispatched unit stranded by a later closure is a valid state the exercise surfaces, not a violation |
-| I6  | A `closed` bridge implies every route in its `routeIds` is `closed`                                                                                                      |
-| I7  | Every facility belongs to exactly one zone; every incident to at most one                                                                                                |
-| I8  | `clientReportId` is unique; `applied` reports have `appliedAt`; only `applied` reports name an incident; `rejected` reports have a reason                                |
-| I9  | At most one plan is `proposed` at a time                                                                                                                                 |
-| I10 | A `proposed` plan holds only `proposed` assignments; an `approved` plan holds none                                                                                       |
-| I11 | Every route, bridge, and impact forecast is flagged `synthetic`                                                                                                          |
-| I12 | `revision` is a non-negative integer; event revisions never decrease or exceed it                                                                                        |
-| I13 | Modeled capacities stay in bounds: `0 <= currentLoad <= syntheticCapacity`, with non-negative crew and people-at-risk                                                    |
+| Change                                                                                  | Kind                     | Impact on the frontend                            |
+| --------------------------------------------------------------------------------------- | ------------------------ | ------------------------------------------------- |
+| `ReasoningProvider` narrowed from `'ifm' \| 'gemini' \| 'mock'` to `'gemini' \| 'mock'` | **Breaking (narrowing)** | Remove any `'ifm'` branch; it can no longer occur |
+| `HealthResponse.mode` drops `'ifm-live'`                                                | **Breaking (narrowing)** | Remove any `'ifm-live'` branch                    |
+| `AgentRecommendation.proposedAction?`                                                   | Additive                 | Optional; render an Approve control when present  |
+| `Scenario.phase`                                                                        | Additive, seeded         | Optional to display                               |
+| `scenario.advance` command + `AdvanceScenarioResult`                                    | Additive                 | Needed only to drive the script                   |
+| `POST /api/recommendations/approve`                                                     | New endpoint             | Needed only for the approval control              |
+| `POST /api/scenario/advance`, `GET /api/scenario/script`                                | New endpoints            | Needed only for scripted progression              |
+| Two new `WorldStateEventType` values                                                    | Additive                 | Rendered as ordinary events                       |
 
-Three properties are behavioural rather than structural, so they are asserted by tests rather than by `checkInvariants`:
+Every existing endpoint keeps its shape. No existing field was removed or retyped except the two narrowings above, both of which only delete a case that can no longer occur.
 
-- **Exactly-once sync.** Replaying `report.sync` with the same `clientReportId` set adds no incidents and no events, and returns those reports as `duplicates`.
-- **Reset fidelity.** After `scenario.reset`, the state deep-equals the seed, `revision` is `0`, and every ledger — queued reports, generated events, and command deduplication — is cleared.
-- **Command idempotency.** Replaying any `commandId` returns the original result with `duplicate: true`, appends no events, and leaves the revision unchanged.
+## 10. Invariants
 
-## 7. Ownership
+Executable as `checkInvariants(scenario)`, which must return `[]` after every command.
 
-| Area                                                          | Owner  |
-| ------------------------------------------------------------- | ------ |
-| `packages/shared`, `docs/`, backend integration, verification | Claude |
-| `apps/web` and matching the UI reference                      | Codex  |
-| `packages/engine` — simulation, transitions, determinism      | K2     |
-| Five in-app chiefs behind `ReasoningAdapter`                  | Gemini |
+| Id  | Invariant                                                                                                                 |
+| --- | ------------------------------------------------------------------------------------------------------------------------- |
+| I1  | Exactly 3 hospitals, at least 3 fire houses, exactly 2 police hubs, exactly 2 rescue centers                              |
+| I2  | No unit is held by more than one active (`approved` or `dispatched`) assignment                                           |
+| I3  | A held unit is not `available`; a unit marked `assigned` holds exactly one active assignment                              |
+| I4  | Every referenced incident, resource, and facility id exists                                                               |
+| I5  | No **proposed** plan routes a unit over a `closed` route; an already-dispatched unit stranded by a later closure is valid |
+| I6  | A `closed` bridge implies every route in its `routeIds` is `closed`                                                       |
+| I7  | Every facility belongs to exactly one zone; every incident to at most one                                                 |
+| I8  | `clientReportId` is unique; `applied` reports have `appliedAt`; only `applied` reports name an incident                   |
+| I9  | At most one plan is `proposed` at a time                                                                                  |
+| I10 | A `proposed` plan holds only `proposed` assignments; an `approved` plan holds none                                        |
+| I11 | Every route, bridge, and impact forecast is flagged `synthetic`                                                           |
+| I12 | `revision` is a non-negative integer; event revisions never decrease or exceed it                                         |
+| I13 | Modeled capacities stay in bounds: `0 <= currentLoad <= syntheticCapacity`                                                |
 
-**K2 owns the simulation engine.** That means the deterministic simulation code,
-not a hosted model in the request path: no state transition consults any model.
-**Gemini is advisory only** — a chief's output is a `pending` recommendation
-carrying the revision it analyzed, and it reaches world state only if a human
-approves a plan, which the engine then re-validates against live state.
+Behavioural properties, asserted by tests rather than `checkInvariants`:
 
-Rules for everyone: do not change `packages/shared` without updating this document. Do not add a required field to `Scenario` without seeding it. Do not make an external service mandatory. Do not print or log secret values.
+- **Exactly-once sync** — replaying `report.sync` adds no incidents and no events.
+- **Reset fidelity** — after `scenario.reset` the state deep-equals the seed, `revision` is `0`, and every ledger is cleared.
+- **Command idempotency** — replaying any `commandId` returns the original result with `duplicate: true`.
+- **Approval staleness** — an approval against a superseded revision is refused, not executed.
 
-## 8. Open items
+## 11. Ownership
 
-- Dispatch and completion transitions (`dispatched` → `complete`) are still out of scope.
-- Persistence is in-memory: a server restart returns to the seed.
-- Incident-raising detail for `scenario.trigger_flood` (how many synthetic incidents per intensity level) is deliberately left to the backend, constrained only by I1–I13.
-- `ReasoningAdapter` is implemented by Gemini (chiefs) and the deterministic mock. The IFM client is retained as development tooling only and is never invoked for chiefs.
+| Area                                                      | Owner  |
+| --------------------------------------------------------- | ------ |
+| `packages/shared`, `packages/engine`, `apps/api`, `docs/` | Claude |
+| `apps/web` frontend alignment                             | Codex  |
+
+Rules: do not change `packages/shared` without updating this document; do not add a required field to `Scenario` without seeding it; do not make an external service mandatory; do not print or log secret values.
+
+## 12. Out of scope
+
+Voice, additional databases, optimization solvers, and further sponsor integrations are explicitly out of scope for this pass.

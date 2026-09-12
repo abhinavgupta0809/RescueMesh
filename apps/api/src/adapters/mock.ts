@@ -31,7 +31,18 @@ export class MockReasoningAdapter implements ReasoningAdapter {
   async recommend(role: AgentRole, scenario: Scenario) {
     const existing = scenario.recommendations.find((item) => item.agent === role);
     if (!existing) throw new Error(`No deterministic recommendation seeded for ${role}`);
-    return clone(existing);
+    const recommendation = clone(existing);
+    // The incident commander's seeded advice maps onto a plan request, so the
+    // approval boundary is demoable with no credentials at all. The other four
+    // stay advisory-only, which is also what the UI must handle.
+    if (role === 'incident_commander' && recommendation.relatedIncidentId) {
+      recommendation.proposedAction = {
+        kind: 'plan.propose',
+        incidentIds: [recommendation.relatedIncidentId]
+      };
+    }
+    recommendation.status = 'pending';
+    return recommendation;
   }
 }
 

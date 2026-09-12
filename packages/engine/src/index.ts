@@ -1,5 +1,11 @@
 export { SimulationEngine, type SimulationEngineOptions } from './engine.js';
-export { applyCommand, severityFromReport, type ApplyContext, type ApplyResult } from './apply.js';
+export {
+  applyCommand,
+  severityFromReport,
+  SCRIPT_SOURCE_VERSION,
+  type ApplyContext,
+  type ApplyResult
+} from './apply.js';
 export { createInitialState, nextId, type EngineState } from './state.js';
 export {
   allocate,

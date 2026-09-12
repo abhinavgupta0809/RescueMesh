@@ -26,24 +26,24 @@ apps/web             React + Vite command-center interface        (Codex)
        │  HTTP: typed commands + revision polling
 apps/api             Express API, adapter boundary, Gemini chiefs  (Claude)
        │
-packages/engine      Deterministic simulation engine               (K2)
+packages/engine      Deterministic simulation engine — sole state authority
        │
 packages/shared      Domain schemas, commands, invariants, seed    (Claude)
 ```
 
 The API owns the adapter boundary. Its current adapters return deterministic fixture data, so the demo is repeatable and offline-friendly:
 
-| Capability                             | Integration                    | Behaviour                                             |
-| -------------------------------------- | ------------------------------ | ----------------------------------------------------- |
-| World state and every state transition | Deterministic engine (in-repo) | Authoritative. No model is consulted.                 |
-| Five in-app AI chiefs                  | Gemini                         | Live when `GEMINI_API_KEY` is set; mock otherwise     |
-| Resource allocation                    | Deterministic allocator        | Greedy, explainable; not a solver                     |
-| Shared world state persistence         | MongoDB Atlas                  | In-memory engine state                                |
-| Geography and travel time              | Google Maps, Places, Routes    | Synthetic coordinates and modeled routes              |
-| Spoken field reports and alerts        | ElevenLabs                     | Transcript-only mock response                         |
-| User roles                             | Auth0                          | Fixed commander role                                  |
-| Backend hosting                        | Vultr                          | Local Node process                                    |
-| Development tooling                    | IFM / K2                       | `npm run k2`, `npm run ifm:check`. Not used by chiefs |
+| Capability                             | Integration                    | Behaviour                                                             |
+| -------------------------------------- | ------------------------------ | --------------------------------------------------------------------- |
+| World state and every state transition | Deterministic engine (in-repo) | Authoritative. No model is consulted.                                 |
+| Five in-app AI chiefs                  | Gemini                         | Live when `GEMINI_API_KEY` is set; mock otherwise                     |
+| Resource allocation                    | Deterministic allocator        | Greedy, explainable; not a solver                                     |
+| Shared world state persistence         | MongoDB Atlas                  | In-memory engine state                                                |
+| Geography and travel time              | Google Maps, Places, Routes    | Synthetic coordinates and modeled routes                              |
+| Spoken field reports and alerts        | ElevenLabs                     | Transcript-only mock response                                         |
+| User roles                             | Auth0                          | Fixed commander role                                                  |
+| Backend hosting                        | Vultr                          | Local Node process                                                    |
+| Development tooling (no runtime role)  | IFM / K2                       | `npm run k2`, `npm run ifm:check`. Reserved for a separate submission |
 
 The adapters are simple interfaces in `apps/api/src/adapters/contracts.ts`. Replacing a mock should not require changing route handlers or the shared schema.
 
@@ -99,14 +99,14 @@ routes before any resource is assigned.
 
 | Area                                                     | Owner  |
 | -------------------------------------------------------- | ------ |
-| `packages/engine` — simulation, transitions, determinism | K2     |
+| `packages/engine` — simulation, transitions, determinism | Claude |
 | Five in-app AI chiefs behind `ReasoningAdapter`          | Gemini |
 | `apps/web` — command-center frontend                     | Codex  |
 | `packages/shared`, backend integration, verification     | Claude |
 
-"K2 owns the simulation engine" means K2 builds and maintains the deterministic
-simulation code. It does **not** mean a state transition calls a hosted model.
-No runtime state change consults any model.
+The deterministic engine in `packages/engine` is the sole authority for
+simulation state. **No model participates in a state transition.** Gemini
+advises; the operator approves; the engine validates and applies.
 
 ## Enabling the Gemini chiefs
 
@@ -148,16 +148,18 @@ Advice is memoised against the scenario revision it analyzed, so repeated UI
 polling at an unchanged revision calls no model at all. A command advances the
 revision and retires the cached advice.
 
-### IFM / K2 development tooling
+### IFM / K2 — development tooling, no runtime role
 
-The IFM client is retained for development and is **never invoked for chiefs**:
+**RescueMesh never calls IFM.** No request path reads an IFM credential, and the
+demo runs fully with `IFM_API_KEY` empty. The client below is standalone
+tooling, reserved for a separate Vault Ledger submission:
 
 ```bash
 npm run k2 -- "your prompt"     # one-shot chat with an IFM model
 npm run ifm:check               # verify an IFM key end to end
 ```
 
-These need `IFM_API_KEY`; they are unrelated to the chiefs and to world state.
+These need `IFM_API_KEY` only if you use them. They are unrelated to the chiefs, to scenario progression, and to world state.
 
 ## Two-minute demo flow
 
@@ -203,6 +205,6 @@ This checks formatting, lint rules, TypeScript across all workspaces, seed/API t
 
 ## Next sensible slice
 
-The five chiefs run on Gemini behind `ReasoningAdapter`, and the eight-step command flow is wired end to end through the deterministic simulation engine. The IFM/K2 client is development tooling only and is never invoked for chiefs.
+The five chiefs run on Gemini behind `ReasoningAdapter`; the eight-step command flow and the recorded scenario script run end to end through the deterministic engine, with no model in any state transition. K2/IFM has no runtime role and is reserved for a separate submission.
 
 The next sensible slices, in order: persist world state behind `WorldStateStore` so a restart does not return to the seed; retire `apps/web/src/mock-client.ts` now that the engine covers the same behaviour; then dispatch and completion transitions (`dispatched` -> `complete`).

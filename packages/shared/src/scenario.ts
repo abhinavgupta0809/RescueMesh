@@ -5,6 +5,7 @@ export const pittsburghFloodScenario: Scenario = {
   name: 'Monongahela Flash Flood — 18:40',
   city: 'Pittsburgh',
   revision: 0,
+  phase: 'escalating',
   simulatedTime: '2026-07-18T18:40:00-04:00',
   status: 'active',
   facilities: [

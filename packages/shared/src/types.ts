@@ -64,6 +64,22 @@ export interface Assignment {
   rationale: string;
 }
 
+/**
+ * The bounded set of actions a chief's advice may map onto. Everything else is
+ * advisory-only prose: approving it changes nothing.
+ *
+ * Each member corresponds to an EXISTING engine command. Approval never invents
+ * a new capability, and the engine validates the resulting command exactly as it
+ * validates an operator's own.
+ */
+export type ApprovableAction = {
+  kind: 'plan.propose';
+  /** Limit the plan to these incidents. Must be existing incident ids. */
+  incidentIds?: string[];
+  /** Keep this many available units of each kind in reserve. */
+  reserveUnitsPerKind?: number;
+};
+
 export interface AgentRecommendation {
   id: string;
   agent: AgentRole;
@@ -73,6 +89,11 @@ export interface AgentRecommendation {
   relatedIncidentId?: string;
   createdAt: string;
   status: 'pending' | 'accepted' | 'dismissed';
+  /**
+   * Present only when this advice maps onto a supported engine command. Absent
+   * means the recommendation is advisory-only and cannot be executed.
+   */
+  proposedAction?: ApprovableAction;
 }
 
 export type WorldStateEventType =
@@ -87,7 +108,9 @@ export type WorldStateEventType =
   | 'report_applied'
   | 'plan_proposed'
   | 'plan_approved'
-  | 'scenario_reset';
+  | 'scenario_reset'
+  | 'scenario_step_applied'
+  | 'scenario_development_refused';
 
 export interface WorldStateEvent {
   id: string;
@@ -186,6 +209,8 @@ export interface Scenario {
   city: 'Pittsburgh';
   /** Monotonic counter. Increments by exactly one per applied command. */
   revision: number;
+  /** Narrative phase, moved only by the recorded scenario script. */
+  phase: 'escalating' | 'holding' | 'stabilizing';
   simulatedTime: string;
   status: 'monitoring' | 'active' | 'stabilizing';
   facilities: Facility[];

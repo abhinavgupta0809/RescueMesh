@@ -1,6 +1,6 @@
 import {
   pittsburghFloodScenario,
-  type Command,
+  type EngineCommand,
   type CommandResponse,
   type Scenario
 } from '@rescuemesh/shared';
@@ -61,14 +61,14 @@ export class SimulationEngine {
   }
 
   /** Applies one command. On failure the world is left exactly as it was. */
-  execute(command: Command): CommandResponse {
+  execute(command: EngineCommand): CommandResponse {
     const { state, response } = applyCommand(this.current, command, this.context);
     this.current = state;
     return response;
   }
 
   /** Convenience for running a scripted sequence, e.g. the eight-step demo. */
-  executeAll(commands: Command[]): CommandResponse[] {
+  executeAll(commands: EngineCommand[]): CommandResponse[] {
     return commands.map((command) => this.execute(command));
   }
 }

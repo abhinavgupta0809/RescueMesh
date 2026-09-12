@@ -14,12 +14,13 @@ import { ResilientReasoningAdapter } from './reasoning.js';
 export type Adapters = ReturnType<typeof createAdapters>;
 
 /**
- * Gemini powers the five chiefs. When no Gemini key is present the
+ * Gemini powers the five advisory chiefs. When no Gemini key is present the
  * deterministic mock answers instead, with visible provenance.
  *
- * The IFM/K2 client is deliberately NOT wired here: it is retained as
- * development tooling (`npm run k2`, `npm run ifm:check`) and is never invoked
- * for chief reasoning.
+ * K2/IFM has no runtime role in RescueMesh. Nothing here reads an IFM
+ * credential, and no request is ever made to IFM. The client that remains under
+ * `adapters/ifm.ts` and `scripts/` is standalone development tooling, reserved
+ * for a separate submission, and is not part of any request path.
  */
 export const createAdapters = (config: GeminiConfig | null, fetchImpl?: FetchLike) => ({
   reasoning: new ResilientReasoningAdapter(

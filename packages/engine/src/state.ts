@@ -20,6 +20,11 @@ export interface EngineState {
   counters: Record<string, number>;
   /** Route statuses before a bridge closed them, so reopening restores rather than guesses. */
   bridgeRouteMemory: Record<string, Record<string, Route['status']>>;
+  /**
+   * Scenario-script batches already applied. Makes a replayed step a no-op, so
+   * replay and reset never depend on anything outside the engine.
+   */
+  appliedScriptBatches: Record<string, true>;
 }
 
 export const createInitialState = (
@@ -29,7 +34,8 @@ export const createInitialState = (
   appliedCommands: {},
   appliedReports: {},
   counters: {},
-  bridgeRouteMemory: {}
+  bridgeRouteMemory: {},
+  appliedScriptBatches: {}
 });
 
 /** Next deterministic id for a prefix, e.g. `nextId(state, 'inc-sim')` -> `inc-sim-1`. */

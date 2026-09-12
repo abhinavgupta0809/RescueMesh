@@ -1,4 +1,10 @@
 import type {
+  ScenarioPhase,
+  ScenarioStepName,
+  ScriptedEvent,
+  RejectedDevelopment
+} from './scripted-scenario.js';
+import type {
   FieldReport,
   Incident,
   ResourcePlan,
@@ -92,6 +98,21 @@ export interface ApprovePlanPayload {
   planId: string;
 }
 
+/**
+ * Applies one step of the recorded scenario script. The developments are
+ * authored deterministic content, not model output; this command is how the
+ * engine validates and atomically applies them.
+ */
+export interface AdvanceScenarioPayload {
+  /** Idempotency key for the batch. Re-applying it is a no-op. */
+  batchId: string;
+  basedOnRevision: number;
+  step: ScenarioStepName;
+  rationale: string;
+  assumptions: string[];
+  developments: ScriptedEvent[];
+}
+
 /** Reset takes no payload: it restores the seeded scenario exactly. */
 export type ResetScenarioPayload = Record<string, never>;
 
@@ -105,6 +126,26 @@ export type SubmitReportCommand = CommandEnvelope<'report.submit', SubmitReportP
 export type SyncReportsCommand = CommandEnvelope<'report.sync', SyncReportsPayload>;
 export type ProposePlanCommand = CommandEnvelope<'plan.propose', ProposePlanPayload>;
 export type ApprovePlanCommand = CommandEnvelope<'plan.approve', ApprovePlanPayload>;
+/**
+ * Applying a scripted step is a server-side operation, deliberately NOT part of
+ * the public `Command` union: the UI reaches it through
+ * `POST /api/scenario/advance`, never by submitting a generic command. Keeping
+ * it out of `Command` leaves the frontend's command contract unchanged.
+ */
+export interface AdvanceScenarioCommand {
+  type: 'scenario.advance';
+  commandId: string;
+  issuedAt: string;
+  expectedRevision?: number;
+  payload: AdvanceScenarioPayload;
+}
+
+/** Everything the engine can apply: public commands plus server-side ones. */
+export type EngineCommand = Command | AdvanceScenarioCommand;
+
+export type EngineCommandResultMap = CommandResultMap & {
+  'scenario.advance': AdvanceScenarioResult;
+};
 export type ResetScenarioCommand = CommandEnvelope<'scenario.reset', ResetScenarioPayload>;
 
 export type Command =
@@ -150,6 +191,25 @@ export interface ApprovePlanResult {
   /** Resources moved from `available` to `assigned` by this approval. */
   assignedResourceIds: string[];
 }
+/** One development the engine applied, with any id it generated. */
+export interface AppliedDevelopment {
+  kind: ScriptedEvent['kind'];
+  summary: string;
+  createdEntityId?: { localRef: string; id: string };
+}
+
+export interface AdvanceScenarioResult {
+  batchId: string;
+  step: ScenarioStepName;
+  /** Always the recorded script. Present so the UI can label provenance honestly. */
+  source: { kind: 'scripted'; version: string };
+  rationale: string;
+  assumptions: string[];
+  applied: AppliedDevelopment[];
+  rejected: RejectedDevelopment[];
+  phase: ScenarioPhase;
+}
+
 export interface ResetScenarioResult {
   scenario: Scenario;
 }
@@ -165,6 +225,8 @@ export interface CommandResultMap {
   'scenario.reset': ResetScenarioResult;
 }
 
+export type EngineCommandType = Command['type'] | 'scenario.advance';
+
 export type CommandErrorCode =
   | 'validation_failed'
   | 'unknown_command'
@@ -179,6 +241,8 @@ export type CommandErrorCode =
   | 'plan_not_proposed'
   | 'infeasible'
   | 'provider_unavailable'
+  | 'scenario_batch_stale'
+  | 'no_acceptable_developments'
   | 'internal_error';
 
 export interface CommandError {
@@ -214,7 +278,8 @@ export type CommandSuccess<TType extends CommandType = CommandType> = {
 export interface CommandFailure {
   ok: false;
   commandId: string;
-  type: CommandType | 'unknown';
+  /** `EngineCommandType` so a server-side command can also fail here. */
+  type: EngineCommandType | 'unknown';
   /** Revision at the time of rejection. Never advances on failure. */
   revision: number;
   error: CommandError;

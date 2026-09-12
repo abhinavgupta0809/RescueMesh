@@ -1,6 +1,7 @@
 import type {
   AgentRecommendation,
   AgentRole,
+  ApprovableAction,
   Incident,
   Scenario,
   Severity
@@ -207,7 +208,10 @@ export class GeminiReasoningAdapter implements ReasoningAdapter {
         'Reply with a single JSON object using exactly these keys:',
         '{"summary": string (max 90 chars, the decision), "action": string (max 260 chars, the',
         'concrete next step naming unit or facility IDs from the brief), "confidence": number',
-        'between 0 and 1, "relatedIncidentId": one of the incident IDs provided, or null}.',
+        'between 0 and 1, "relatedIncidentId": one of the incident IDs provided or null,',
+        '"proposePlan": either null, or {"incidentIds": [ids to plan for], "reserveUnitsPerKind":',
+        'integer 0-3} when your advice is best carried out by asking the allocator for a',
+        'resource plan. Use null when your advice is guidance rather than an allocation.}.',
         `Valid incident IDs: ${incidentIds.join(', ') || 'none'}.`,
         'Only reference IDs present in the brief. Stay inside your own role.',
         'All capacities and travel times in the brief are modeled for this exercise.'
@@ -232,6 +236,10 @@ export class GeminiReasoningAdapter implements ReasoningAdapter {
         ? parsed.relatedIncidentId
         : undefined;
 
+    // A bounded, validated action the operator may approve. Anything the model
+    // suggests outside this shape is treated as advisory prose.
+    const proposedAction = readProposedAction(parsed.proposePlan, incidentIds);
+
     return {
       id: `rec-gemini-${role}-${Date.now().toString(36)}`,
       agent: role,
@@ -240,7 +248,31 @@ export class GeminiReasoningAdapter implements ReasoningAdapter {
       confidence: Math.round(confidence * 100) / 100,
       createdAt: new Date().toISOString(),
       status: 'pending',
-      ...(relatedIncidentId ? { relatedIncidentId } : {})
+      ...(relatedIncidentId ? { relatedIncidentId } : {}),
+      ...(proposedAction ? { proposedAction } : {})
     };
   }
 }
+
+/**
+ * The only action a chief may propose is a plan request, and only against
+ * incident ids that actually exist. Anything else becomes advisory-only, so a
+ * hallucinated action can never be approved into a command.
+ */
+const readProposedAction = (raw: unknown, incidentIds: string[]): ApprovableAction | undefined => {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const candidate = raw as { incidentIds?: unknown; reserveUnitsPerKind?: unknown };
+  const ids = Array.isArray(candidate.incidentIds)
+    ? candidate.incidentIds.filter(
+        (id): id is string => typeof id === 'string' && incidentIds.includes(id)
+      )
+    : [];
+  const reserveRaw = Number(candidate.reserveUnitsPerKind);
+  const reserve =
+    Number.isInteger(reserveRaw) && reserveRaw >= 0 && reserveRaw <= 3 ? reserveRaw : undefined;
+  return {
+    kind: 'plan.propose',
+    ...(ids.length > 0 ? { incidentIds: ids } : {}),
+    ...(reserve !== undefined ? { reserveUnitsPerKind: reserve } : {})
+  };
+};

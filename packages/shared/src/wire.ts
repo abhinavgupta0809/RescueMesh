@@ -1,10 +1,11 @@
+import type { CommandResponse } from './commands.js';
 import type { AgentRecommendation, Incident, Scenario, WorldStateEvent } from './types.js';
 
 /**
  * Which reasoning backend produced a response. `mock` is the deterministic
  * fixture path and is always available; the others are optional adapters.
  */
-export type ReasoningProvider = 'ifm' | 'gemini' | 'mock';
+export type ReasoningProvider = 'gemini' | 'mock';
 
 /** Provenance attached to every reasoning result the API returns. */
 export interface ReasoningSource {
@@ -18,7 +19,7 @@ export interface ReasoningSource {
 export interface HealthResponse {
   status: 'ok';
   service: string;
-  mode: 'ifm-live' | 'gemini-live' | 'deterministic-mock';
+  mode: 'gemini-live' | 'deterministic-mock';
   reasoning: { provider: ReasoningProvider; model: string; configured: boolean };
   edge: 'online' | 'offline-ready';
 }
@@ -62,4 +63,28 @@ export interface RecommendationsResponse {
   /** True when the set was served from cache without calling a model. */
   cached: boolean;
   items: RecommendationResponse[];
+}
+
+/** Request to execute a chief's proposed action. */
+export interface ApproveRecommendationRequest {
+  recommendationId: string;
+  /**
+   * The revision the operator saw when they approved. If world state has moved
+   * on, the approval is stale and must be revalidated before it can execute.
+   */
+  analyzedRevision: number;
+  commandId?: string;
+}
+
+export type ApprovalRefusalCode =
+  'not_found' | 'stale_recommendation' | 'advisory_only' | 'already_resolved';
+
+export interface ApproveRecommendationResponse {
+  ok: boolean;
+  recommendationId: string;
+  /** Current world revision, whether or not the approval executed. */
+  revision: number;
+  /** The engine's own response to the derived command. Absent when refused. */
+  command?: CommandResponse;
+  refusal?: { code: ApprovalRefusalCode; message: string; currentRevision?: number };
 }

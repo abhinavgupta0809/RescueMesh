@@ -9,6 +9,14 @@ import type {
 import { adapters as defaultAdapters, type Adapters } from './adapters/index.js';
 import { AGENT_ROLES, RecommendationCache } from './recommendations.js';
 import { HTTP_STATUS_BY_ERROR, parseCommand, World } from './world.js';
+import { approveRecommendation } from './approvals.js';
+import {
+  resolveStep,
+  scenarioSteps,
+  SCRIPT_VERSION,
+  STEP_ALLOWED_KINDS
+} from './scenario/script.js';
+import { SCENARIO_STEPS, type ScenarioStepName } from '@rescuemesh/shared';
 
 const isAgentRole = (value: string): value is (typeof AGENT_ROLES)[number] =>
   (AGENT_ROLES as string[]).includes(value);
@@ -90,6 +98,93 @@ export const createApp = ({ adapters = defaultAdapters, world = new World() }: A
    * The five Gemini chiefs analyze the current scenario. Memoised per revision:
    * polling at an unchanged revision calls no model.
    */
+  /**
+   * Advances the recorded scenario script by one operator-selected step.
+   * Entirely deterministic: no model is called, and nothing here needs network
+   * access or credentials.
+   */
+  api.post('/api/scenario/advance', (request, response) => {
+    const body = request.body as { step?: unknown; commandId?: unknown } | null;
+    const step = body?.step;
+    if (typeof step !== 'string' || !(SCENARIO_STEPS as readonly string[]).includes(step)) {
+      response.status(400).json({ error: 'unknown step', validSteps: SCENARIO_STEPS });
+      return;
+    }
+    const batch = resolveStep(step as ScenarioStepName, world.revision);
+    const commandId =
+      typeof body?.commandId === 'string' && body.commandId.trim()
+        ? body.commandId
+        : `${batch.batchId}-cmd`;
+
+    const result = world.execute({
+      type: 'scenario.advance',
+      commandId,
+      issuedAt: new Date().toISOString(),
+      payload: {
+        batchId: batch.batchId,
+        basedOnRevision: batch.basedOnRevision,
+        step: batch.step,
+        rationale: batch.rationale,
+        assumptions: batch.assumptions,
+        developments: batch.developments
+      }
+    });
+    if (!result.ok) {
+      response.status(HTTP_STATUS_BY_ERROR[result.error.code]).json(result);
+      return;
+    }
+    // World state moved, so cached chief advice no longer describes it.
+    if (!result.duplicate) recommendations.invalidate();
+    response.json(result);
+  });
+
+  /** What the scenario script offers. No provider, no budget: it is recorded content. */
+  api.get('/api/scenario/script', (_request, response) => {
+    response.json({
+      source: 'scripted',
+      version: SCRIPT_VERSION,
+      steps: scenarioSteps(),
+      allowedKindsByStep: STEP_ALLOWED_KINDS
+    });
+  });
+
+  /**
+   * The approval boundary: turns a chief's supported proposed action into an
+   * existing engine command. Refuses stale, unknown, resolved, or advisory-only
+   * recommendations rather than executing them.
+   */
+  api.post('/api/recommendations/approve', (request, response) => {
+    const body = request.body as {
+      recommendationId?: unknown;
+      analyzedRevision?: unknown;
+      commandId?: unknown;
+    } | null;
+    if (typeof body?.recommendationId !== 'string' || !body.recommendationId.trim()) {
+      response.status(400).json({ error: 'recommendationId is required' });
+      return;
+    }
+    if (!Number.isInteger(body.analyzedRevision) || Number(body.analyzedRevision) < 0) {
+      response.status(400).json({ error: 'analyzedRevision must be a non-negative integer' });
+      return;
+    }
+    const outcome = approveRecommendation(world, recommendations, {
+      recommendationId: body.recommendationId,
+      analyzedRevision: Number(body.analyzedRevision),
+      ...(typeof body.commandId === 'string' ? { commandId: body.commandId } : {})
+    });
+    if (outcome.refusal) {
+      const status = outcome.refusal.code === 'not_found' ? 404 : 409;
+      response.status(status).json(outcome);
+      return;
+    }
+    if (outcome.command && !outcome.command.ok) {
+      response.status(HTTP_STATUS_BY_ERROR[outcome.command.error.code]).json(outcome);
+      return;
+    }
+    recommendations.invalidate();
+    response.json(outcome);
+  });
+
   api.get('/api/recommendations', async (_request, response) => {
     response.json((await recommendations.get(world.scenario)) satisfies RecommendationsResponse);
   });
