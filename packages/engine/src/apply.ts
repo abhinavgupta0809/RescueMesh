@@ -1,5 +1,9 @@
 import {
   checkInvariants,
+  collisionSlowdownRouteId,
+  DISASTER_TEMPLATES,
+  peopleAtRiskFor,
+  validateExercise,
   validateScriptedBatch,
   type EngineCommand,
   type CommandError,
@@ -18,6 +22,7 @@ import {
   type WorldStateEventType,
   type Zone,
   type AppliedDevelopment,
+  type AppliedDisaster,
   type ScriptedEvent
 } from '@rescuemesh/shared';
 import { allocate, isReachable } from './allocator.js';
@@ -54,6 +59,7 @@ const ERROR_RETRYABLE: Record<CommandErrorCode, boolean> = {
   infeasible: false,
   provider_unavailable: true,
   scenario_batch_stale: true,
+  exercise_rejected: false,
   no_acceptable_developments: false,
   internal_error: true
 };
@@ -679,6 +685,95 @@ const route = (
           phase
         }
       };
+    }
+
+    case 'scenario.exercise': {
+      const { exerciseId, basedOnRevision, disasters } = command.payload;
+      if (!exerciseId || typeof exerciseId !== 'string') {
+        return reject('validation_failed', 'exerciseId is required');
+      }
+      if (draft.appliedScriptBatches[exerciseId]) {
+        return reject('scenario_batch_stale', `exercise ${exerciseId} was already applied`);
+      }
+      if (basedOnRevision !== scenario.revision) {
+        return reject(
+          'scenario_batch_stale',
+          `exercise analyzed revision ${basedOnRevision} but world state is at ${scenario.revision}`
+        );
+      }
+
+      // Re-validated here even though the route handler already did: the engine
+      // never trusts a caller, and an exercise is accepted or refused whole.
+      const validation = validateExercise(disasters, scenario);
+      if (!validation.ok) {
+        return reject('exercise_rejected', validation.rejection.message, {
+          rejection: validation.rejection
+        });
+      }
+
+      const applied: AppliedDisaster[] = [];
+      const slowedRouteIds: string[] = [];
+
+      for (const disaster of validation.disasters) {
+        const template = DISASTER_TEMPLATES[disaster.kind];
+        const zone = scenario.zones.find((candidate) => candidate.id === disaster.zoneId);
+        const anchor = scenario.facilities.find((f) => f.id === zone?.facilityIds[0]);
+        const zoneName = zone?.name ?? disaster.zoneId;
+        const incident: Incident = {
+          id: nextId(draft, 'inc-exr'),
+          title: template.title(zoneName),
+          description: template.description(zoneName, disaster.severity),
+          severity: disaster.severity,
+          location: { lat: anchor?.location.lat ?? 40.44, lng: anchor?.location.lng ?? -79.99 },
+          address: `${zoneName} — modeled location`,
+          reportedAt: ctx.clock.now(),
+          status: 'active',
+          peopleAtRisk: peopleAtRiskFor(disaster.kind, disaster.severity),
+          requiredCapabilities: [...template.requiredCapabilities]
+        };
+        scenario.incidents.push(incident);
+        zone?.incidentIds.push(incident.id);
+        emit(
+          'incident_reported',
+          `${template.label} raised in ${zoneName} (${disaster.severity}, modeled exercise).`,
+          [incident.id, disaster.zoneId]
+        );
+
+        // A collision slows one modeled route leaving a facility in its zone.
+        // Never closed, never invented; skipped entirely when the zone owns none.
+        if (template.slowsLocalRoute) {
+          const routeId = collisionSlowdownRouteId(scenario, disaster.zoneId);
+          const route = routeId ? scenario.routes.find((r) => r.id === routeId) : undefined;
+          if (route) {
+            route.status = 'slow';
+            slowedRouteIds.push(route.id);
+            emit('road_changed', `${route.id} slowed by the modeled collision in ${zoneName}.`, [
+              route.id,
+              disaster.zoneId
+            ]);
+          }
+        }
+
+        applied.push({
+          kind: disaster.kind,
+          zoneId: disaster.zoneId,
+          incidentId: incident.id,
+          requiredCapabilities: [...template.requiredCapabilities],
+          peopleAtRisk: incident.peopleAtRisk
+        });
+      }
+
+      scenario.status = 'active';
+      draft.appliedScriptBatches[exerciseId] = true;
+      emit(
+        'exercise_started',
+        `Exercise ${exerciseId}: ${applied
+          .map((a) => `${DISASTER_TEMPLATES[a.kind].label} in ${a.zoneId}`)
+          .join(' + ')}. Applied as one transition. Fictional exercise content.`,
+        [exerciseId, ...applied.map((a) => a.incidentId)]
+      );
+
+      return { ok: true, data: { exerciseId, applied, slowedRouteIds } };
     }
 
     case 'scenario.reset': {

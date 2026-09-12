@@ -72,6 +72,29 @@ confirmed against live Gemini (`ready`, 11 calls, 0 retries, 0 substitutions, 0 
 - [x] Polling produces no additional Gemini calls
 - [x] Reset clears the active deliberation
 
+## Milestone 2C — Multi-hazard exercises (backend complete)
+
+Flash flood joined by structural fire and multi-vehicle collision, one or two
+per exercise, operator-selected per zone. Contract:
+[IMPLEMENTATION_CONTRACT.md](IMPLEMENTATION_CONTRACT.md) §2a.
+
+- [x] `DisasterKind`, `DisasterSpecification`, exercise validation in `packages/shared`
+- [x] Capability templates aligned to the real seed vocabulary
+- [x] `scenario.exercise` engine command applying one or two disasters atomically
+- [x] `POST /api/simulations` accepting `disasters`, preserving the existing `step` flow
+
+**Exit criteria** — all met with injected model responses; no live Gemini request was
+made for this milestone. Frontend selection UI is Codex's and not yet built:
+
+- [x] Any supported disaster in any zone, Downtown included
+- [x] Two disasters apply in exactly one revision
+- [x] Deliberation starts only after the complete exercise is applied
+- [x] All five chiefs see the full multi-disaster snapshot
+- [x] Duplicate `requestId` creates no extra incidents and no extra model calls
+- [x] Every rejection case named and refused whole
+- [x] Reset removes flood, fire and collision incidents and returns to revision zero
+- [x] Polling stays at eleven calls
+
 ## Milestone 3 — OR-Tools allocation
 
 Implement an allocation adapter as a small Python service or child process only after the interactive loop is stable.

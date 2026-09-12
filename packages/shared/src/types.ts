@@ -110,7 +110,8 @@ export type WorldStateEventType =
   | 'plan_approved'
   | 'scenario_reset'
   | 'scenario_step_applied'
-  | 'scenario_development_refused';
+  | 'scenario_development_refused'
+  | 'exercise_started';
 
 export interface WorldStateEvent {
   id: string;

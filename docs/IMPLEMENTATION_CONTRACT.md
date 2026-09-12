@@ -55,6 +55,74 @@ The script is authored TypeScript. The same step from the same revision always p
 
 Script developments are bounded and validated exactly like any other input: at most three per step, only existing entity ids, no resource creation, no assignment, no travel times. New entities carry a `localRef` and **the engine generates the real id**.
 
+## 2a. Multi-hazard exercises
+
+An exercise is **one or two** operator-selected disasters, applied as a single
+engine transition before any deliberation begins.
+
+### Specification
+
+```ts
+type DisasterKind = 'flash_flood' | 'structural_fire' | 'multi_vehicle_collision';
+
+interface DisasterSpecification {
+  kind: DisasterKind;
+  zoneId: string; // any existing zone, Downtown included
+  severity: Severity; // the existing domain enum
+}
+```
+
+Accepted: any supported kind in any existing zone; two different kinds in
+different zones; two different kinds in the **same** zone; the same kind in two
+**different** zones.
+
+Rejected, with a named code: zero disasters (`no_disasters`), more than two
+(`too_many_disasters`), unknown kind (`unknown_kind`), unknown zone
+(`unknown_zone`), invalid severity (`invalid_severity`), and a duplicate
+identical kind+zone pair (`duplicate_disaster`).
+
+### Capability mapping
+
+Derived from the **actual seed vocabulary** — no requirement is introduced that
+no resource type can serve:
+
+| Kind                      | Required capabilities                                                          | Served by                           |
+| ------------------------- | ------------------------------------------------------------------------------ | ----------------------------------- |
+| `flash_flood`             | `swift-water-rescue`, `evacuation`, `advanced-life-support`, `traffic-control` | rescue boat, police unit, ambulance |
+| `structural_fire`         | `fire-suppression`, `evacuation`, `advanced-life-support`, `traffic-control`   | fire engine, police unit, ambulance |
+| `multi_vehicle_collision` | `advanced-life-support`, `traffic-control`, `fire-suppression`                 | ambulance, police unit, fire engine |
+
+**On extrication:** the seed has no `extrication` capability. Fire engines are
+the extrication asset in practice, so collision requires `fire-suppression` as
+the fire-engine call rather than inventing a capability nothing can serve.
+Introducing one would guarantee a permanent unmet shortfall.
+
+Every casualty estimate, capacity, travel time and people-at-risk value stays
+synthetic.
+
+### Collision route effect
+
+A collision deterministically slows **one** modeled route: the lowest-id `open`
+route whose `fromId` is a facility in the collision's zone. It is set to `slow`,
+never `closed`, and a route gated by a closed bridge is skipped so I6 cannot
+break. If the zone owns no such route, incident generation proceeds and no route
+changes — the exercise never invents a route or a reference.
+
+### Atomic application
+
+`POST /api/simulations` applies the whole exercise through **one**
+`scenario.exercise` engine command:
+
+1. Validate the complete request; reject it whole if any disaster is invalid.
+2. Apply every disaster in that single command — **the revision advances exactly once**.
+3. Emit one `incident_reported` per disaster plus one `exercise_started` audit event.
+4. Freeze the resulting scenario and revision.
+5. Start exactly one eleven-call deliberation against that snapshot.
+
+Deliberation never starts after the first disaster and then sees the second: the
+world is complete before the snapshot is taken. A duplicate `requestId` returns
+the existing session and creates no incidents and no model calls.
+
 ## 3. Gemini ownership
 
 Gemini powers five advisory chiefs — Incident Commander, Medical Chief, Police Chief, Rescue Chief, Logistics Chief. Each:

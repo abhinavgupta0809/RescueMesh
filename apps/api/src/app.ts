@@ -19,7 +19,12 @@ import {
   SCRIPT_VERSION,
   STEP_ALLOWED_KINDS
 } from './scenario/script.js';
-import { SCENARIO_STEPS, type ScenarioStepName } from '@rescuemesh/shared';
+import {
+  DISASTER_TEMPLATES,
+  SCENARIO_STEPS,
+  validateExercise,
+  type ScenarioStepName
+} from '@rescuemesh/shared';
 
 const isAgentRole = (value: string): value is (typeof AGENT_ROLES)[number] =>
   (AGENT_ROLES as string[]).includes(value);
@@ -164,7 +169,11 @@ export const createApp = ({
    * holding a long request. `requestId` makes a duplicate press idempotent.
    */
   api.post('/api/simulations', (request, response) => {
-    const body = request.body as { step?: unknown; requestId?: unknown } | null;
+    const body = request.body as {
+      step?: unknown;
+      requestId?: unknown;
+      disasters?: unknown;
+    } | null;
     const requestId = typeof body?.requestId === 'string' ? body.requestId : undefined;
     if (requestId) {
       const existing = sessions.findByRequestId(requestId);
@@ -176,7 +185,43 @@ export const createApp = ({
 
     let disaster = 'Current scenario state';
     let step: ScenarioStepName | undefined;
-    if (body?.step !== undefined) {
+
+    // Multi-hazard exercise: one or two operator-selected disasters, applied as
+    // ONE engine transition before the deliberation snapshot is frozen.
+    if (body?.disasters !== undefined) {
+      if (body.step !== undefined) {
+        response
+          .status(400)
+          .json({ error: 'ambiguous_request', message: 'Send either `disasters` or `step`.' });
+        return;
+      }
+      const validation = validateExercise(body.disasters, world.scenario);
+      if (!validation.ok) {
+        response.status(400).json({ error: validation.rejection.code, ...validation.rejection });
+        return;
+      }
+      // Derived from the revision and the specification itself, never from the
+      // wall clock: the id reaches the event log, so a clock-based one would
+      // make an otherwise identical replay produce different world state.
+      const fingerprint = validation.disasters
+        .map((d) => `${d.kind}@${d.zoneId}:${d.severity}`)
+        .join('+');
+      const exerciseId = `exercise-r${world.revision}-${fingerprint}`;
+      const applied = world.execute({
+        type: 'scenario.exercise',
+        commandId: `${exerciseId}-cmd`,
+        issuedAt: new Date().toISOString(),
+        payload: { exerciseId, basedOnRevision: world.revision, disasters: validation.disasters }
+      });
+      if (!applied.ok) {
+        response.status(HTTP_STATUS_BY_ERROR[applied.error.code]).json(applied);
+        return;
+      }
+      recommendations.invalidate();
+      disaster = validation.disasters
+        .map((d) => `${DISASTER_TEMPLATES[d.kind].label} (${d.severity}) in ${d.zoneId}`)
+        .join(' + ');
+    } else if (body?.step !== undefined) {
       if (
         typeof body.step !== 'string' ||
         !(SCENARIO_STEPS as readonly string[]).includes(body.step)

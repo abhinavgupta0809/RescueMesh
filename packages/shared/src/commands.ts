@@ -1,3 +1,4 @@
+import type { DisasterKind, DisasterSpecification } from './disaster.js';
 import type {
   ScenarioPhase,
   ScenarioStepName,
@@ -140,11 +141,49 @@ export interface AdvanceScenarioCommand {
   payload: AdvanceScenarioPayload;
 }
 
+/**
+ * Applies a complete multi-hazard exercise as ONE transition. Server-side, like
+ * `scenario.advance`: the UI reaches it through `POST /api/simulations`, so the
+ * public `Command` union and the frontend's exhaustive switch are unchanged.
+ */
+export interface StartExercisePayload {
+  /** Idempotency key. Re-applying the same exercise is a no-op. */
+  exerciseId: string;
+  basedOnRevision: number;
+  /** One or two, already validated against the scenario. */
+  disasters: DisasterSpecification[];
+}
+
+export interface StartExerciseCommand {
+  type: 'scenario.exercise';
+  commandId: string;
+  issuedAt: string;
+  expectedRevision?: number;
+  payload: StartExercisePayload;
+}
+
+/** One disaster the engine actually created. */
+export interface AppliedDisaster {
+  kind: DisasterKind;
+  zoneId: string;
+  incidentId: string;
+  requiredCapabilities: string[];
+  peopleAtRisk: number;
+}
+
+export interface StartExerciseResult {
+  exerciseId: string;
+  applied: AppliedDisaster[];
+  /** Routes a collision deterministically slowed. Empty when none applied. */
+  slowedRouteIds: string[];
+}
+
 /** Everything the engine can apply: public commands plus server-side ones. */
-export type EngineCommand = Command | AdvanceScenarioCommand;
+export type EngineCommand = Command | AdvanceScenarioCommand | StartExerciseCommand;
 
 export type EngineCommandResultMap = CommandResultMap & {
   'scenario.advance': AdvanceScenarioResult;
+  'scenario.exercise': StartExerciseResult;
 };
 export type ResetScenarioCommand = CommandEnvelope<'scenario.reset', ResetScenarioPayload>;
 
@@ -225,7 +264,7 @@ export interface CommandResultMap {
   'scenario.reset': ResetScenarioResult;
 }
 
-export type EngineCommandType = Command['type'] | 'scenario.advance';
+export type EngineCommandType = Command['type'] | 'scenario.advance' | 'scenario.exercise';
 
 export type CommandErrorCode =
   | 'validation_failed'
@@ -242,6 +281,7 @@ export type CommandErrorCode =
   | 'infeasible'
   | 'provider_unavailable'
   | 'scenario_batch_stale'
+  | 'exercise_rejected'
   | 'no_acceptable_developments'
   | 'internal_error';
 

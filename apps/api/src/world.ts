@@ -79,6 +79,7 @@ export const HTTP_STATUS_BY_ERROR: Record<CommandErrorCode, number> = {
   route_closed: 422,
   provider_unavailable: 503,
   scenario_batch_stale: 409,
+  exercise_rejected: 400,
   no_acceptable_developments: 422,
   internal_error: 500
 };
