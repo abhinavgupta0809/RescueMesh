@@ -44,7 +44,7 @@ Replaced only `ReasoningAdapter`; the deterministic mock remains the fallback.
 
 **Exit check:** malformed, blocked, or unreachable Gemini responses fall back visibly and safely, and model output can never mutate world state. Covered by `apps/api/src/app.test.ts`.
 
-## Milestone 2B — Visible multi-chief deliberation and final plan (backend complete)
+## Milestone 2B — Visible multi-chief deliberation and final plan (complete)
 
 Three rounds over one frozen snapshot: five initial positions, five
 cross-reviews, one Incident Commander synthesis. Eleven Gemini calls per
@@ -56,8 +56,9 @@ complete deliberation. Contract: [IMPLEMENTATION_CONTRACT.md](IMPLEMENTATION_CON
 - [x] Recorded deliberation fixture on the identical contract, labelled "Scripted fallback"
 - [x] Per-session call and token budget with configurable timeouts
 
-**Exit criteria** — all verified with injected responses; live Gemini verification of the
-eleven-call path is still outstanding, and the frontend is not yet built:
+**Exit criteria** — all met. Verified with injected responses, and the eleven-call path
+confirmed against live Gemini (`ready`, 11 calls, 0 retries, 0 substitutions, 0 errors,
+36s wall clock, zero bounds violations). The deliberation frontend is complete:
 
 - [x] Simulate creates exactly one session for one scenario revision
 - [x] All five role positions appear

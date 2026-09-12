@@ -157,3 +157,12 @@
     flex-wrap: wrap;
   }
 }
+
+/* Provenance of an allocation: engine-produced, never AI-generated. */
+.plan-provenance {
+  margin: 0 0 8px;
+  padding: 0 14px;
+  color: #8fa6bd;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { createClient, makeCommand, ApiError } from './api-client';
+import { planProvenanceLabel } from './contract';
 import type { Command, FieldReport, FrontendClient, Scenario } from './contract';
 import { AdviceRequests, ChiefAdvice, emptyAdvice, type ApprovalOutcomes } from './ChiefAdvice';
 import { readQueue, writeQueue } from './offline-queue';
@@ -563,6 +564,12 @@ export function App() {
                   title="Resource recommendation"
                   aside={plan ? `ENGINE · ${plan.status}` : 'HUMAN REVIEW'}
                 />
+                {plan && (
+                  <p className="plan-provenance">
+                    Engine-validated plan · {planProvenanceLabel(plan.generatedBy)} · not
+                    AI-generated
+                  </p>
+                )}
                 <div className="plan-content">
                   <div className="plan-summary">
                     {plan ? (

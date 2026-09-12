@@ -89,3 +89,22 @@ export interface FrontendClient {
     analyzedRevision: number
   ): Promise<ApproveRecommendationResponse>;
 }
+
+/**
+ * User-facing label for how a plan was produced.
+ *
+ * The shared enum value `mock` means "the in-repo deterministic allocator",
+ * not "fake" and certainly not "AI-generated". Showing the raw value would
+ * misrepresent an engine-validated allocation, so the presentation layer maps
+ * it here rather than changing the shared enum.
+ */
+export const planProvenanceLabel = (generatedBy: Plan['generatedBy']): string => {
+  switch (generatedBy) {
+    case 'mock':
+      return 'Deterministic allocator';
+    case 'or_tools':
+      return 'Deterministic allocator (OR-Tools)';
+    case 'seeded':
+      return 'Seeded scenario plan';
+  }
+};
