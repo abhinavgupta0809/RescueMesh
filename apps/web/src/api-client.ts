@@ -48,11 +48,11 @@ export function validateScenario(value: unknown): Scenario {
   return s as Scenario;
 }
 export function createHttpClient(baseUrl: string): FrontendClient {
-  async function request(path: string, command?: Command): Promise<unknown> {
+  async function request(path: string, command?: Command, timeoutMs = 8000): Promise<unknown> {
     let response: Response;
     try {
       response = await fetch(`${baseUrl.replace(/\/$/, '')}${path}`, {
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(timeoutMs),
         ...(command
           ? {
               method: 'POST',
@@ -97,12 +97,45 @@ export function createHttpClient(baseUrl: string): FrontendClient {
           : client.scenario();
     },
     recommendations: async () => {
-      const result = (await request('/api/recommendations')) as { items?: Recommendation[] };
+      // The backend's default Gemini budget is 20 seconds. Do not abandon its fallback at 8s.
+      const result = (await request('/api/recommendations', undefined, 30000)) as {
+        items?: Recommendation[];
+      };
       if (
+        !result ||
         !Array.isArray(result.items) ||
-        result.items.some((r) => !r.source?.provider || !r.recommendation?.id)
+        result.items.length !== 5 ||
+        new Set(result.items.map((r) => r?.recommendation?.agent)).size !== 5 ||
+        result.items.some(
+          (r) =>
+            !r ||
+            !r.source ||
+            !['gemini', 'mock'].includes(r.source.provider) ||
+            typeof r.source.model !== 'string' ||
+            !r.source.model.trim() ||
+            typeof r.source.degraded !== 'boolean' ||
+            (r.source.provider === 'gemini' && r.source.degraded) ||
+            !Number.isInteger(r.analyzedRevision) ||
+            r.analyzedRevision < 0 ||
+            !r.recommendation?.id ||
+            ![
+              'incident_commander',
+              'medical_chief',
+              'police_chief',
+              'rescue_chief',
+              'logistics_chief'
+            ].includes(r.recommendation.agent) ||
+            typeof r.recommendation.summary !== 'string' ||
+            typeof r.recommendation.action !== 'string' ||
+            !Number.isFinite(r.recommendation.confidence) ||
+            r.recommendation.confidence < 0 ||
+            r.recommendation.confidence > 1
+        )
       )
-        throw new ApiError('Recommendations are missing source provenance.', 'contract_mismatch');
+        throw new ApiError(
+          'Chief advice has missing or unsupported provenance/revision. No advice has been accepted.',
+          'contract_mismatch'
+        );
       return result.items;
     },
     command: async (command) => {
@@ -119,6 +152,16 @@ export function createHttpClient(baseUrl: string): FrontendClient {
           'Invalid command acknowledgement. Refresh state before retrying.',
           'contract_mismatch'
         );
+      if (
+        result.ok &&
+        command.type === 'plan.approve' &&
+        (!('plan' in result.data) || result.data.plan.status !== 'approved')
+      ) {
+        throw new ApiError(
+          'Plan approval was not confirmed by the engine. Refresh state before retrying.',
+          'contract_mismatch'
+        );
+      }
       return result;
     }
   };
