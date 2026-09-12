@@ -1,0 +1,385 @@
+import {
+  DELIBERATION_CALL_COUNT,
+  isTerminalStatus,
+  validateChiefPosition,
+  validateChiefResponse,
+  validateFinalBrief,
+  type AgentRole,
+  type ChiefPosition,
+  type ChiefResponse,
+  type DeliberationError,
+  type DeliberationSession,
+  type DeliberationStage,
+  type DeliberationSource,
+  type FinalOperationalBrief,
+  type Scenario,
+  type ScenarioStepName
+} from '@rescuemesh/shared';
+import { extractJsonObject } from '../adapters/prompts.js';
+import { GeminiClient, GeminiError } from '../adapters/gemini.js';
+import { AGENT_ROLES } from '../recommendations.js';
+import type { World } from '../world.js';
+import { FIXTURE_MODEL, fixtureBrief, fixturePosition, fixtureResponse } from './fixture.js';
+import { crossReviewPrompt, initialPrompt, synthesisPrompt } from './prompts.js';
+
+export interface DeliberationLimits {
+  /** Hard ceiling on model calls for one session. */
+  maxCalls: number;
+  /** Ceiling on reported tokens for one session. */
+  maxTokens: number;
+  /** Per-call budget; the provider client also has its own. */
+  perCallTimeoutMs: number;
+}
+
+export const DELIBERATION_DEFAULTS: DeliberationLimits = {
+  maxCalls: DELIBERATION_CALL_COUNT,
+  maxTokens: 120_000,
+  perCallTimeoutMs: 30_000
+};
+
+const now = () => new Date().toISOString();
+
+/**
+ * Runs one deliberation over a FROZEN snapshot.
+ *
+ * The snapshot is captured once and every one of the eleven calls sees exactly
+ * that state, so all three rounds reason about the same world even if the
+ * operator changes something mid-flight. If world state moves, the session is
+ * marked `stale` and can no longer produce or execute a plan.
+ *
+ * A failing chief is substituted from the recorded fixture rather than failing
+ * the session; the substitution is named and the session ends `degraded`.
+ * There is no retry loop: each call gets one attempt.
+ */
+export class DeliberationOrchestrator {
+  private readonly sessions = new Map<string, DeliberationSession>();
+  /** requestId -> sessionId, so a duplicate Simulate returns the same session. */
+  private readonly byRequest = new Map<string, string>();
+  /**
+   * Revision reached by a session's own plan-proposal command. Producing the
+   * plan necessarily advances the revision, and a session must not be reported
+   * stale because of the very action it was asked to take.
+   */
+  private readonly planRevisions = new Map<string, number>();
+  private sequence = 0;
+
+  constructor(
+    private readonly world: World,
+    private readonly client: GeminiClient | null,
+    private readonly limits: DeliberationLimits = DELIBERATION_DEFAULTS
+  ) {}
+
+  get configured(): boolean {
+    return this.client !== null;
+  }
+
+  get model(): string {
+    return this.client?.model ?? FIXTURE_MODEL;
+  }
+
+  get(sessionId: string): DeliberationSession | undefined {
+    const session = this.sessions.get(sessionId);
+    if (!session) return undefined;
+    return this.withFreshness(session);
+  }
+
+  list(): DeliberationSession[] {
+    return [...this.sessions.values()].map((session) => this.withFreshness(session));
+  }
+
+  /** Reset clears every session: advice about a discarded world is meaningless. */
+  clear(): void {
+    this.sessions.clear();
+    this.byRequest.clear();
+    this.planRevisions.clear();
+  }
+
+  /** Records the deterministic plan this session produced. */
+  attachPlan(sessionId: string, planId: string | undefined): DeliberationSession | undefined {
+    const current = this.sessions.get(sessionId);
+    if (!current || !planId) return current ? { ...current } : undefined;
+    const updated = { ...current, planId, updatedAt: now() };
+    this.sessions.set(sessionId, updated);
+    this.planRevisions.set(sessionId, this.world.revision);
+    return { ...updated };
+  }
+
+  findByRequestId(requestId: string): DeliberationSession | undefined {
+    const sessionId = this.byRequest.get(requestId);
+    return sessionId ? this.get(sessionId) : undefined;
+  }
+
+  /** A completed session whose revision has been overtaken is reported stale. */
+  private withFreshness(session: DeliberationSession): DeliberationSession {
+    if (session.status !== 'ready' && session.status !== 'degraded') return { ...session };
+    if (this.isCurrentFor(session)) return { ...session };
+    return { ...session, status: 'stale' };
+  }
+
+  /** True while world state is still what this session analyzed. */
+  isCurrentFor(session: DeliberationSession): boolean {
+    if (session.scenarioRevision === this.world.revision) return true;
+    return this.planRevisions.get(session.sessionId) === this.world.revision;
+  }
+
+  /**
+   * Starts a deliberation. Returns as soon as the session exists so the UI can
+   * poll for progress rather than holding one long request.
+   */
+  start(options: {
+    disaster: string;
+    step?: ScenarioStepName;
+    requestId?: string;
+  }): DeliberationSession {
+    if (options.requestId) {
+      const existing = this.findByRequestId(options.requestId);
+      if (existing) return existing;
+    }
+
+    const snapshot = this.world.scenario;
+    const sessionId = `sim-${(this.sequence += 1)}-r${snapshot.revision}`;
+    const session: DeliberationSession = {
+      sessionId,
+      scenarioRevision: snapshot.revision,
+      ...(options.step ? { scenarioStep: options.step } : {}),
+      disaster: options.disaster,
+      status: 'triggered',
+      createdAt: now(),
+      updatedAt: now(),
+      initialPositions: [],
+      crossReview: [],
+      source: this.client
+        ? { provider: 'gemini', model: this.client.model, degraded: false }
+        : {
+            provider: 'scripted',
+            model: FIXTURE_MODEL,
+            degraded: false,
+            warning: 'No Gemini credential configured; this is a recorded deliberation.'
+          },
+      errors: [],
+      usage: { calls: 0, latencyMs: 0, hasUnreportedUsage: false }
+    };
+    this.sessions.set(sessionId, session);
+    if (options.requestId) this.byRequest.set(options.requestId, sessionId);
+
+    // Fire and forget: progress is read through GET, not by holding the request.
+    void this.run(sessionId, snapshot);
+    return { ...session };
+  }
+
+  private patch(sessionId: string, change: Partial<DeliberationSession>): void {
+    const current = this.sessions.get(sessionId);
+    if (!current) return;
+    this.sessions.set(sessionId, { ...current, ...change, updatedAt: now() });
+  }
+
+  private note(sessionId: string, error: DeliberationError): void {
+    const current = this.sessions.get(sessionId);
+    if (!current) return;
+    this.sessions.set(sessionId, {
+      ...current,
+      errors: [...current.errors, error],
+      updatedAt: now()
+    });
+  }
+
+  private budgetLeft(sessionId: string): boolean {
+    const current = this.sessions.get(sessionId);
+    if (!current) return false;
+    if (current.usage.calls >= this.limits.maxCalls) return false;
+    return (current.usage.totalTokens ?? 0) < this.limits.maxTokens;
+  }
+
+  /** One attempt, no retry. Returns the parsed object or throws. */
+  private async call(
+    sessionId: string,
+    stage: DeliberationStage,
+    prompt: { system: string; user: string }
+  ): Promise<Record<string, unknown>> {
+    if (!this.client) throw new GeminiError('transport', 'No Gemini client configured');
+    if (!this.budgetLeft(sessionId)) {
+      throw new GeminiError('transport', 'Deliberation call or token budget exhausted');
+    }
+    const startedAt = Date.now();
+    try {
+      const text = await this.client.generateJson(prompt.system, prompt.user);
+      return extractJsonObject(text, GeminiError);
+    } finally {
+      const current = this.sessions.get(sessionId);
+      if (current) {
+        this.sessions.set(sessionId, {
+          ...current,
+          usage: {
+            ...current.usage,
+            calls: current.usage.calls + 1,
+            latencyMs: current.usage.latencyMs + (Date.now() - startedAt),
+            // The generateContent client does not surface usage figures today.
+            hasUnreportedUsage: true
+          },
+          updatedAt: now()
+        });
+      }
+      void stage;
+    }
+  }
+
+  private async run(sessionId: string, snapshot: Scenario): Promise<void> {
+    let degraded = !this.client;
+
+    // ── Round 1: five independent positions, concurrently ────────────────────
+    this.patch(sessionId, { status: 'initial_analysis' });
+    const positions = await Promise.all(
+      AGENT_ROLES.map(async (role): Promise<ChiefPosition> => {
+        if (!this.client) return { ...fixturePosition(role), substituted: true };
+        try {
+          const raw = await this.call(sessionId, 'initial_analysis', initialPrompt(role, snapshot));
+          const validated = validateChiefPosition(role, raw);
+          if (!validated.ok || !validated.value) {
+            throw new GeminiError('shape', validated.reason ?? 'position failed validation');
+          }
+          return validated.value;
+        } catch (error: unknown) {
+          degraded = true;
+          this.note(sessionId, describe(error, 'initial_analysis', role));
+          return { ...fixturePosition(role), substituted: true };
+        }
+      })
+    );
+    this.patch(sessionId, { initialPositions: positions });
+
+    if (this.isStale(sessionId)) return;
+
+    // ── Round 2: cross-review, using the VALIDATED positions ─────────────────
+    this.patch(sessionId, { status: 'cross_review' });
+    const responses = await Promise.all(
+      AGENT_ROLES.map(async (role): Promise<ChiefResponse> => {
+        if (!this.client) return { ...fixtureResponse(role), substituted: true };
+        try {
+          const raw = await this.call(
+            sessionId,
+            'cross_review',
+            crossReviewPrompt(role, snapshot, positions)
+          );
+          const validated = validateChiefResponse(role, raw);
+          if (!validated.ok || !validated.value) {
+            throw new GeminiError('shape', validated.reason ?? 'response failed validation');
+          }
+          return validated.value;
+        } catch (error: unknown) {
+          degraded = true;
+          this.note(sessionId, describe(error, 'cross_review', role));
+          return { ...fixtureResponse(role), substituted: true };
+        }
+      })
+    );
+    this.patch(sessionId, { crossReview: responses });
+
+    if (this.isStale(sessionId)) return;
+
+    // ── Round 3: one synthesis by the Incident Commander ─────────────────────
+    this.patch(sessionId, { status: 'synthesis' });
+    let brief: FinalOperationalBrief;
+    if (!this.client) {
+      brief = fixtureBrief();
+    } else {
+      try {
+        const raw = await this.call(
+          sessionId,
+          'synthesis',
+          synthesisPrompt(
+            snapshot,
+            positions,
+            responses.map((r) => ({
+              role: r.role,
+              revisedPriority: r.revisedPriority,
+              recommendation: r.recommendation,
+              objections: r.objections
+            })),
+            snapshot.incidents.map((incident) => incident.id)
+          )
+        );
+        const validated = validateFinalBrief(raw);
+        if (!validated.ok || !validated.value) {
+          throw new GeminiError('shape', validated.reason ?? 'brief failed validation');
+        }
+        brief = validated.value;
+      } catch (error: unknown) {
+        degraded = true;
+        this.note(sessionId, describe(error, 'synthesis'));
+        brief = fixtureBrief();
+      }
+    }
+    this.patch(sessionId, { finalBrief: brief, status: 'validating' });
+
+    if (this.isStale(sessionId)) return;
+
+    const source: DeliberationSource = degraded
+      ? {
+          provider: this.client ? 'gemini' : 'scripted',
+          model: this.client?.model ?? FIXTURE_MODEL,
+          degraded: true,
+          warning: this.client
+            ? 'One or more contributions came from the recorded deliberation fixture.'
+            : 'No Gemini credential configured; this is a recorded deliberation.'
+        }
+      : { provider: 'gemini', model: this.client?.model ?? FIXTURE_MODEL, degraded: false };
+
+    this.patch(sessionId, {
+      status: degraded ? 'degraded' : 'ready',
+      source,
+      completedAt: now()
+    });
+  }
+
+  /** Marks the session stale if world state moved while it was running. */
+  private isStale(sessionId: string): boolean {
+    const current = this.sessions.get(sessionId);
+    if (!current) return true;
+    if (isTerminalStatus(current.status)) return true;
+    if (current.scenarioRevision !== this.world.revision) {
+      this.patch(sessionId, {
+        status: 'stale',
+        completedAt: now(),
+        errors: [
+          ...current.errors,
+          {
+            code: 'stale_revision',
+            message: `world state moved from revision ${current.scenarioRevision} to ${this.world.revision} during deliberation`,
+            stage: current.status as DeliberationStage,
+            at: now()
+          }
+        ]
+      });
+      return true;
+    }
+    return false;
+  }
+}
+
+const describe = (
+  error: unknown,
+  stage: DeliberationStage,
+  role?: AgentRole
+): DeliberationError => {
+  const base = { stage, at: now(), ...(role ? { role } : {}) };
+  if (error instanceof GeminiError) {
+    const code =
+      error.stage === 'timeout'
+        ? 'timeout'
+        : error.stage === 'blocked'
+          ? 'blocked'
+          : error.stage === 'shape'
+            ? 'malformed_output'
+            : 'provider_unavailable';
+    return {
+      ...base,
+      code,
+      message: error.detail ? `${error.message} (${error.detail})` : error.message
+    };
+  }
+  return {
+    ...base,
+    code: 'internal_error',
+    message: error instanceof Error ? error.message : String(error)
+  };
+};

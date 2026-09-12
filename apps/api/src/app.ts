@@ -10,6 +10,9 @@ import { adapters as defaultAdapters, type Adapters } from './adapters/index.js'
 import { AGENT_ROLES, RecommendationCache } from './recommendations.js';
 import { HTTP_STATUS_BY_ERROR, parseCommand, World } from './world.js';
 import { approveRecommendation } from './approvals.js';
+import { DeliberationOrchestrator } from './deliberation/orchestrator.js';
+import { GeminiClient } from './adapters/gemini.js';
+import { readGeminiConfig } from './config.js';
 import {
   resolveStep,
   scenarioSteps,
@@ -24,11 +27,21 @@ const isAgentRole = (value: string): value is (typeof AGENT_ROLES)[number] =>
 export interface AppOptions {
   adapters?: Adapters;
   world?: World;
+  /** Injected in tests; production builds one from the environment. */
+  deliberation?: DeliberationOrchestrator;
 }
 
-export const createApp = ({ adapters = defaultAdapters, world = new World() }: AppOptions = {}) => {
+export const createApp = ({
+  adapters = defaultAdapters,
+  world = new World(),
+  deliberation
+}: AppOptions = {}) => {
   const api = express();
   const recommendations = new RecommendationCache(adapters.reasoning);
+  const geminiConfig = readGeminiConfig();
+  const sessions =
+    deliberation ??
+    new DeliberationOrchestrator(world, geminiConfig ? new GeminiClient(geminiConfig) : null);
 
   api.use(cors());
   api.use(express.json({ limit: '64kb' }));
@@ -90,7 +103,11 @@ export const createApp = ({ adapters = defaultAdapters, world = new World() }: A
       return;
     }
     // Advice is tied to the revision it analyzed, so a state change retires it.
-    if (!result.duplicate) recommendations.invalidate();
+    if (!result.duplicate) {
+      recommendations.invalidate();
+      // A reset discards the world these sessions were reasoning about.
+      if (parsed.command.type === 'scenario.reset') sessions.clear();
+    }
     response.json(result);
   });
 
@@ -136,6 +153,125 @@ export const createApp = ({ adapters = defaultAdapters, world = new World() }: A
     // World state moved, so cached chief advice no longer describes it.
     if (!result.duplicate) recommendations.invalidate();
     response.json(result);
+  });
+
+  /**
+   * Simulate: advance the deterministic scenario if a step was named, freeze the
+   * resulting revision, and start one five-chief deliberation over it.
+   *
+   * Returns as soon as the session exists. The eleven model calls run in the
+   * background and are read through GET, so the UI shows progress without
+   * holding a long request. `requestId` makes a duplicate press idempotent.
+   */
+  api.post('/api/simulations', (request, response) => {
+    const body = request.body as { step?: unknown; requestId?: unknown } | null;
+    const requestId = typeof body?.requestId === 'string' ? body.requestId : undefined;
+    if (requestId) {
+      const existing = sessions.findByRequestId(requestId);
+      if (existing) {
+        response.json({ session: existing, duplicate: true });
+        return;
+      }
+    }
+
+    let disaster = 'Current scenario state';
+    let step: ScenarioStepName | undefined;
+    if (body?.step !== undefined) {
+      if (
+        typeof body.step !== 'string' ||
+        !(SCENARIO_STEPS as readonly string[]).includes(body.step)
+      ) {
+        response.status(400).json({ error: 'unknown step', validSteps: SCENARIO_STEPS });
+        return;
+      }
+      step = body.step as ScenarioStepName;
+      const batch = resolveStep(step, world.revision);
+      const applied = world.execute({
+        type: 'scenario.advance',
+        commandId: `${batch.batchId}-sim`,
+        issuedAt: new Date().toISOString(),
+        payload: {
+          batchId: batch.batchId,
+          basedOnRevision: batch.basedOnRevision,
+          step: batch.step,
+          rationale: batch.rationale,
+          assumptions: batch.assumptions,
+          developments: batch.developments
+        }
+      });
+      if (!applied.ok) {
+        response.status(HTTP_STATUS_BY_ERROR[applied.error.code]).json(applied);
+        return;
+      }
+      recommendations.invalidate();
+      disaster = `Scripted step: ${step}`;
+    }
+
+    const session = sessions.start({
+      disaster,
+      ...(step ? { step } : {}),
+      ...(requestId ? { requestId } : {})
+    });
+    response.status(201).json({ session, duplicate: false });
+  });
+
+  /** Progress and whatever contributions are complete. Makes no model calls. */
+  api.get('/api/simulations/:sessionId', (request, response) => {
+    const session = sessions.get(request.params.sessionId);
+    if (!session) {
+      response.status(404).json({ error: 'unknown session' });
+      return;
+    }
+    response.json({ session });
+  });
+
+  /**
+   * Turns the synthesised brief into a deterministic candidate plan. The engine
+   * validates routes, capacity, availability and revision freshness; this
+   * handler only translates and reports.
+   */
+  api.post('/api/simulations/:sessionId/final-plan', (request, response) => {
+    const session = sessions.get(request.params.sessionId);
+    if (!session) {
+      response.status(404).json({ error: 'unknown session' });
+      return;
+    }
+    if (session.planId) {
+      response.json({ session, planId: session.planId, duplicate: true });
+      return;
+    }
+    if (session.status === 'stale' || !sessions.isCurrentFor(session)) {
+      response.status(409).json({
+        error: 'stale_session',
+        message: `session analyzed revision ${session.scenarioRevision} but world state is at ${world.revision}. Re-run Simulate.`,
+        session
+      });
+      return;
+    }
+    if (session.status !== 'ready' && session.status !== 'degraded') {
+      response.status(409).json({ error: 'not_ready', status: session.status, session });
+      return;
+    }
+    if (!session.finalBrief) {
+      response.status(409).json({ error: 'not_ready', status: session.status, session });
+      return;
+    }
+    // The brief's prose never becomes a command. The only thing carried across
+    // is a request for a plan, which the deterministic allocator answers.
+    const result = world.execute({
+      type: 'plan.propose',
+      commandId: `${session.sessionId}-plan`,
+      issuedAt: new Date().toISOString(),
+      payload: {}
+    });
+    if (!result.ok) {
+      response.status(HTTP_STATUS_BY_ERROR[result.error.code]).json({ session, command: result });
+      return;
+    }
+    const planId = result.type === 'plan.propose' ? result.data.plan.id : undefined;
+    const updated = sessions.attachPlan(session.sessionId, planId);
+    recommendations.invalidate();
+    response.json({ session: updated ?? session, planId, command: result, duplicate: false });
   });
 
   /** What the scenario script offers. No provider, no budget: it is recorded content. */

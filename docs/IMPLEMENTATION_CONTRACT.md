@@ -65,6 +65,102 @@ Gemini powers five advisory chiefs — Incident Commander, Medical Chief, Police
 
 Validation before any output is surfaced: severities must match the domain enum, incident ids are checked against the scenario and dropped if invented, and confidence is clamped.
 
+## 3a. Five-chief deliberation
+
+The chiefs can also run as a **visible deliberation** over one frozen snapshot:
+three rounds, eleven Gemini calls, one operator-approvable outcome.
+
+```
+operator presses Simulate
+  1. engine triggers/advances the selected scripted disaster      (deterministic)
+  2. backend FREEZES the resulting scenario revision
+  3. five chiefs analyze that same snapshot, in parallel          (5 calls)
+  4. UI shows each chief's initial position
+  5. each chief sees the other four positions and responds        (5 calls)
+  6. Incident Commander synthesises both rounds into a brief      (1 call)
+  7. deterministic planner turns supported actions into a plan
+  8. engine validates routes, capacity, availability, freshness
+  9. UI shows the candidate plan
+ 10. ONLY operator approval executes it
+```
+
+**Exactly eleven calls per complete deliberation.** Polling, rendering, and
+reset make none. A session is computed once and read many times.
+
+This transcript is **explicit public-facing output**. Chiefs are asked for
+short stated positions only. Hidden chain-of-thought is never requested,
+never stored, and never displayed.
+
+### Lifecycle
+
+```
+triggered → initial_analysis → cross_review → synthesis → validating → ready
+                     │               │            │           │
+                     └───────────────┴────────────┴───────────┴──→ degraded | stale | failed
+```
+
+| Terminal   | Meaning                                                               |
+| ---------- | --------------------------------------------------------------------- |
+| `ready`    | All three rounds validated; a candidate plan exists or is obtainable  |
+| `degraded` | Completed on the scripted fallback, or with a chief substituted       |
+| `stale`    | World state advanced during deliberation; the result must not execute |
+| `failed`   | Could not complete even on fallback                                   |
+
+### Session shape
+
+`DeliberationSession` carries `sessionId`, `scenarioRevision`, the disaster or
+scenario step, `createdAt`/`updatedAt`/`completedAt`, `status`, five
+`ChiefPosition`s, five `ChiefResponse`s, a `FinalOperationalBrief`, the
+resulting `planId` when available, `DeliberationSource` provenance, any
+`DeliberationError`s, and token/latency metadata when the provider reports it.
+
+Each artefact is deliberately narrow, and anything outside the shape is
+rejected rather than trimmed:
+
+- **`ChiefPosition`** — `role`, `situationSummary`, `topPriorities` (≤3),
+  `risks` (≤3), `proposedActions` (≤3), `confidence`.
+- **`ChiefResponse`** — `role`, `agreements`, `objections`, `revisedPriority`,
+  `recommendation`, `confidence`.
+- **`FinalOperationalBrief`** — `situationSummary`, `pointsOfAgreement`,
+  `unresolvedDisputes`, `orderedPriorities`, `proposedActions`, `rationale`,
+  `confidence`.
+
+Strict JSON validation throughout. Unknown action kinds and entity ids that do
+not exist in the frozen snapshot are rejected, never coerced.
+
+### Freezing and staleness
+
+The snapshot and its revision are captured once, at step 2, and every call in
+all three rounds sees that same snapshot. Before a plan is produced, and again
+before it is approved, the revision is rechecked. If world state moved during
+deliberation the session becomes `stale`: its brief may be read, but it cannot
+produce or execute a plan. Reset clears any active session.
+
+### Failure and fallback
+
+Deterministic simulation continues whether or not Gemini is reachable. A
+missing key, timeout, block, or malformed reply falls back to a **recorded
+deliberation fixture** using the identical contract, labelled **"Scripted
+fallback"** and never "Gemini-generated". There is no unbounded retry: each
+call gets one attempt within its timeout, and a per-session call and token
+budget caps the work.
+
+A single chief failing does not fail the session — that role is filled from the
+fixture, the session ends `degraded`, and the substitution is named.
+
+### Routes
+
+| Route                                         | Purpose                                                           |
+| --------------------------------------------- | ----------------------------------------------------------------- |
+| `POST /api/simulations`                       | Trigger the deterministic scenario action **and** start a session |
+| `GET /api/simulations/:sessionId`             | Progress and whatever contributions are complete                  |
+| `POST /api/simulations/:sessionId/final-plan` | Produce the deterministic candidate plan after synthesis          |
+| `POST /api/recommendations/approve`           | **Unchanged.** Still the only execution boundary.                 |
+
+These are additive. `POST /api/scenario/advance`, `GET /api/recommendations`
+and every existing route keep their current shape and behaviour; the
+independent five-chief advice path in §3 is untouched and still available.
+
 ## 4. Approval boundary
 
 **Gemini must never directly mutate state.** The only path from advice to a state change:
@@ -75,6 +171,11 @@ chief recommendation (pending, carries analyzedRevision)
    → backend maps proposedAction to an EXISTING engine command
    → engine validates it like any operator command
 ```
+
+A deliberation's candidate plan reaches execution through this same boundary:
+the session produces a `proposed` plan via the engine, and the operator
+approves it with the existing `plan.approve` command. Nothing about a
+deliberation shortens or bypasses this path.
 
 The approvable set is deliberately narrow. Today it is exactly one member:
 

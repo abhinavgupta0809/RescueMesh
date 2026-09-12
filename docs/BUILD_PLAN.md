@@ -30,7 +30,7 @@ Contract: [docs/IMPLEMENTATION_CONTRACT.md](IMPLEMENTATION_CONTRACT.md) — eigh
 
 **Exit check:** the presenter runs the full eight-step flow twice with identical results and resets in one click, with `checkInvariants()` clean after every command. Verified over HTTP and through the frontend's own client.
 
-## Milestone 2 — Gemini chiefs (complete)
+## Milestone 2A — Independent five-chief advice (complete)
 
 Replaced only `ReasoningAdapter`; the deterministic mock remains the fallback.
 
@@ -43,6 +43,33 @@ Replaced only `ReasoningAdapter`; the deterministic mock remains the fallback.
 - [x] Model requests confined to the backend; no credential reaches the frontend
 
 **Exit check:** malformed, blocked, or unreachable Gemini responses fall back visibly and safely, and model output can never mutate world state. Covered by `apps/api/src/app.test.ts`.
+
+## Milestone 2B — Visible multi-chief deliberation and final plan (backend complete)
+
+Three rounds over one frozen snapshot: five initial positions, five
+cross-reviews, one Incident Commander synthesis. Eleven Gemini calls per
+complete deliberation. Contract: [IMPLEMENTATION_CONTRACT.md](IMPLEMENTATION_CONTRACT.md) §3a.
+
+- [x] Typed contracts: `DeliberationSession`, `DeliberationStatus`, `ChiefPosition`, `ChiefResponse`, `FinalOperationalBrief`, `DeliberationSource`, `DeliberationError`
+- [x] Backend orchestrator freezing one snapshot for all three rounds
+- [x] Session API: `POST /api/simulations`, `GET /api/simulations/:id`, `POST /api/simulations/:id/final-plan`
+- [x] Recorded deliberation fixture on the identical contract, labelled "Scripted fallback"
+- [x] Per-session call and token budget with configurable timeouts
+
+**Exit criteria** — all verified with injected responses; live Gemini verification of the
+eleven-call path is still outstanding, and the frontend is not yet built:
+
+- [x] Simulate creates exactly one session for one scenario revision
+- [x] All five role positions appear
+- [x] Each cross-review is based on the validated initial positions
+- [x] The Incident Commander produces one final operational brief
+- [x] Gemini output cannot change world state
+- [x] A state revision during deliberation makes the result stale
+- [x] The final plan passes deterministic engine validation
+- [x] No plan executes before operator approval
+- [x] Gemini failure produces a visibly labelled scripted fallback
+- [x] Polling produces no additional Gemini calls
+- [x] Reset clears the active deliberation
 
 ## Milestone 3 — OR-Tools allocation
 
