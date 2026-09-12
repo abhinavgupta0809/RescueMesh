@@ -17,31 +17,32 @@ A judge can submit or select a field report, see it become a structured incident
 
 **Exit check:** `npm run check` passes, `/health` returns mock mode, and the app renders without credentials.
 
-## Milestone 1 — Interactive simulation loop
+## Milestone 1 — Interactive simulation loop (complete)
 
-The contract for this milestone is [docs/IMPLEMENTATION_CONTRACT.md](IMPLEMENTATION_CONTRACT.md): eight typed commands, three separate state machines, and twelve invariants enforced by `checkInvariants()`.
+Contract: [docs/IMPLEMENTATION_CONTRACT.md](IMPLEMENTATION_CONTRACT.md) — eight typed commands, three separate state machines, thirteen invariants enforced by `checkInvariants()`.
 
-- [x] Typed commands, state transitions, response/error shapes, and invariants defined in the shared package
-- [x] Field-report form with two preset reports and free text
-- [x] A parsed report rendered as a reviewable incident draft with visible provenance
-- [ ] `POST /api/commands` handlers for all eight commands (K2)
-- [ ] `GET /api/world-state?since=<revision>` polling shape (K2)
-- [ ] Browser-local offline queue and reconnect-and-sync flow (Codex)
-- [ ] Reset action wired to `scenario.reset` (K2 + Codex)
+- [x] Typed commands, transitions, response/error shapes, and invariants in `packages/shared`
+- [x] Deterministic simulation engine in `packages/engine` with an injected clock and seeded IDs
+- [x] `POST /api/commands` wired to the engine; the engine is the only writer of world state
+- [x] `GET /api/world-state?since=<revision>` revision polling
+- [x] Frontend driving those endpoints, with browser-local offline queueing
+- [x] Reset restores the seed and clears queues, generated events, and command deduplication
 
-**Exit check:** the presenter can run the full eight-step flow twice with identical results and reset it in one click, with `checkInvariants()` clean after every command.
+**Exit check:** the presenter runs the full eight-step flow twice with identical results and resets in one click, with `checkInvariants()` clean after every command. Verified over HTTP and through the frontend's own client.
 
-## Milestone 2 — IFM K2 reasoning (complete)
+## Milestone 2 — Gemini chiefs (complete)
 
-Replaced only `ReasoningAdapter` while retaining the mock implementation.
+Replaced only `ReasoningAdapter`; the deterministic mock remains the fallback.
 
-- [x] Strict JSON output contracts for report parsing and each AI role
-- [x] IFM K2 parsing with timeouts, validation, and fallback to the deterministic mock
-- [x] A narrow prompt per chief, each seeing only the world-state fields for that role (`roleContext`)
-- [x] Recommendations stay advisory and `pending` until a human accepts them
-- [x] Source (`ifm` or `mock`) and confidence shown per card in the interface
+- [x] Strict JSON output contracts for report parsing and each chief role
+- [x] Gemini behind `ReasoningAdapter` with timeouts, validation, and mock fallback
+- [x] A narrow prompt per chief, each seeing only its own world-state slice (`roleContext`)
+- [x] Recommendations stay advisory and `pending`; approval goes back through the engine
+- [x] Provider, model, and `degraded` status shown per card in the interface
+- [x] Advice memoised per scenario revision, so polling triggers no model calls
+- [x] Model requests confined to the backend; no credential reaches the frontend
 
-**Exit check:** malformed model output cannot mutate world state; missing credentials and provider errors fall back visibly and safely. Covered by `apps/api/src/adapters/ifm.test.ts`, `reasoning.test.ts`, and the live-mode cases in `app.test.ts`.
+**Exit check:** malformed, blocked, or unreachable Gemini responses fall back visibly and safely, and model output can never mutate world state. Covered by `apps/api/src/app.test.ts`.
 
 ## Milestone 3 — OR-Tools allocation
 
@@ -79,14 +80,18 @@ An on-device IFM model is a stretch goal after the hosted flow is reliable. Limi
 
 ## Suggested ownership
 
-| Workstream                           | Primary surface          | Can proceed after            |
-| ------------------------------------ | ------------------------ | ---------------------------- |
-| Command-center interactions          | `apps/web`               | Milestone 0                  |
-| World-state commands and event log   | `apps/api`               | Milestone 0                  |
-| IFM K2 adapter and output validation | `apps/api/src/adapters`  | Incident review flow         |
-| OR-Tools optimizer                   | isolated adapter/service | Assignment approval flow     |
-| Map and route integration            | web + geography adapter  | Stable incident/resource IDs |
-| Deployment and demo script           | repository operations    | Milestones 1–3               |
+| Workstream                                          | Primary surface               | Owner      |
+| --------------------------------------------------- | ----------------------------- | ---------- |
+| Command-center frontend                             | `apps/web`                    | Codex      |
+| Simulation engine and deterministic behaviour       | `packages/engine`             | K2         |
+| Five in-app AI chiefs                               | `apps/api/src/adapters`       | Gemini     |
+| Shared contracts, backend integration, verification | `packages/shared`, `apps/api` | Claude     |
+| OR-Tools optimizer (later)                          | isolated service              | unassigned |
+| Map and route integration (later)                   | geography adapter             | unassigned |
+
+**K2 owns the simulation engine** — it builds and maintains the deterministic
+simulation code. No runtime state transition calls a hosted model. **Gemini
+provides advisory reasoning only** and never mutates world state.
 
 ## Scope guardrails
 

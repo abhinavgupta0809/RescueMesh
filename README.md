@@ -22,25 +22,28 @@ The ordered implementation roadmap and milestone exit criteria are in [docs/BUIL
 ## Architecture
 
 ```text
-apps/web             React + Vite command-center interface
-       │  HTTP
-apps/api             Express API and integration adapter boundary
+apps/web             React + Vite command-center interface        (Codex)
+       │  HTTP: typed commands + revision polling
+apps/api             Express API, adapter boundary, Gemini chiefs  (Claude)
        │
-packages/shared      TypeScript domain schemas + Pittsburgh seed scenario
+packages/engine      Deterministic simulation engine               (K2)
+       │
+packages/shared      Domain schemas, commands, invariants, seed    (Claude)
 ```
 
 The API owns the adapter boundary. Its current adapters return deterministic fixture data, so the demo is repeatable and offline-friendly:
 
-| Capability                               | Intended integration        | Milestone behavior                             |
-| ---------------------------------------- | --------------------------- | ---------------------------------------------- |
-| Incident parsing and five-role reasoning | IFM Labs K2 (hosted)        | Live when `IFM_API_KEY` is set; mock otherwise |
-| Resource allocation                      | OR-Tools                    | Seeded, explainable assignments                |
-| Shared world state                       | MongoDB Atlas               | In-memory cloned scenario fixture              |
-| Geography and travel time                | Google Maps, Places, Routes | Synthetic coordinates and modeled routes       |
-| Spoken field reports and alerts          | ElevenLabs                  | Transcript-only mock response                  |
-| User roles                               | Auth0                       | Fixed commander role                           |
-| Backend hosting                          | Vultr                       | Local Node process                             |
-| Offline edge intelligence                | IFM (on-device)             | Offline-ready status flag                      |
+| Capability                             | Integration                    | Behaviour                                             |
+| -------------------------------------- | ------------------------------ | ----------------------------------------------------- |
+| World state and every state transition | Deterministic engine (in-repo) | Authoritative. No model is consulted.                 |
+| Five in-app AI chiefs                  | Gemini                         | Live when `GEMINI_API_KEY` is set; mock otherwise     |
+| Resource allocation                    | Deterministic allocator        | Greedy, explainable; not a solver                     |
+| Shared world state persistence         | MongoDB Atlas                  | In-memory engine state                                |
+| Geography and travel time              | Google Maps, Places, Routes    | Synthetic coordinates and modeled routes              |
+| Spoken field reports and alerts        | ElevenLabs                     | Transcript-only mock response                         |
+| User roles                             | Auth0                          | Fixed commander role                                  |
+| Backend hosting                        | Vultr                          | Local Node process                                    |
+| Development tooling                    | IFM / K2                       | `npm run k2`, `npm run ifm:check`. Not used by chiefs |
 
 The adapters are simple interfaces in `apps/api/src/adapters/contracts.ts`. Replacing a mock should not require changing route handlers or the shared schema.
 
@@ -65,41 +68,96 @@ Useful endpoints:
 - `GET /api/recommendations` — one recommendation per chief, each with its provenance
 - `GET /api/recommendations/:role` — a single chief, e.g. `rescue_chief`
 
-## Enabling IFM K2 reasoning
+## Runtime architecture
 
-Report parsing and the five chief recommendations run on an IFM Labs hosted model. Pasting a key is the only setup step:
+```text
+  UI (apps/web)
+    │  POST /api/commands        typed command
+    ▼
+  API (apps/api)
+    │  engine.execute(command)
+    ▼
+  Simulation engine (packages/engine)   ← the ONLY thing that mutates world state
+    │  validated, deterministic, invariant-checked
+    ▼
+  API exposes the authoritative scenario
+    │  GET /api/scenario, GET /api/world-state?since=<revision>
+    ▼
+  UI polls, renders, and asks for advice
+    │  GET /api/recommendations
+    ▼
+  Gemini chiefs analyze a role-scoped slice → advisory only, never mutates state
+```
+
+The separation matters: **Gemini advises, the engine decides.** A chief's
+recommendation is a `pending` suggestion carrying the revision it analyzed. To
+act on it, a human approves a plan, and that approval goes back through the
+engine, which re-checks live availability, double-booking, staleness, and closed
+routes before any resource is assigned.
+
+### Ownership
+
+| Area                                                     | Owner  |
+| -------------------------------------------------------- | ------ |
+| `packages/engine` — simulation, transitions, determinism | K2     |
+| Five in-app AI chiefs behind `ReasoningAdapter`          | Gemini |
+| `apps/web` — command-center frontend                     | Codex  |
+| `packages/shared`, backend integration, verification     | Claude |
+
+"K2 owns the simulation engine" means K2 builds and maintains the deterministic
+simulation code. It does **not** mean a state transition calls a hosted model.
+No runtime state change consults any model.
+
+## Enabling the Gemini chiefs
+
+The five chiefs run on Gemini. Pasting a key is the only setup step:
 
 ```bash
-cp .env.example .env        # if you have not already
-# edit .env and set: IFM_API_KEY=IFM-xf...
-npm run ifm:check           # one real call, prints the model's reply
+cp .env.example .env
+# edit .env and set: GEMINI_API_KEY=AIza...
 npm run dev
 ```
 
-`npm run ifm:check` verifies the key, the base URL, and that the model's JSON output validates against the domain schema. It exits non-zero on failure and tells you what broke.
+Without a key the chiefs answer from deterministic mocks, labelled `mock` on
+every card. Model requests are made **only by the backend** — the key is never
+read by, sent to, or exposed in the frontend.
 
-Defaults come from the IFM quickstart and can be overridden in `.env`:
+| Variable                   | Default                                            | Purpose                    |
+| -------------------------- | -------------------------------------------------- | -------------------------- |
+| `GEMINI_API_KEY`           | _(empty)_                                          | Empty means mock-only mode |
+| `GEMINI_BASE_URL`          | `https://generativelanguage.googleapis.com/v1beta` | API base                   |
+| `GEMINI_MODEL`             | `gemini-2.0-flash`                                 | Model id                   |
+| `GEMINI_TIMEOUT_MS`        | `20000`                                            | Budget before falling back |
+| `GEMINI_MAX_OUTPUT_TOKENS` | `1024`                                             | Reply cap                  |
+| `GEMINI_TEMPERATURE`       | `0.2`                                              | Low, output must parse     |
 
-| Variable          | Default                    | Purpose                                     |
-| ----------------- | -------------------------- | ------------------------------------------- |
-| `IFM_API_KEY`     | _(empty)_                  | Your key. Empty means mock-only mode.       |
-| `IFM_BASE_URL`    | `https://api.ifm.ai/v1`    | Chat-completions base URL.                  |
-| `IFM_MODEL`       | `IFM/K2-Horizon-375B-A23B` | Hosted model id.                            |
-| `IFM_TIMEOUT_MS`  | `20000`                    | Per-request budget before falling back.     |
-| `IFM_MAX_TOKENS`  | `800`                      | Reply cap.                                  |
-| `IFM_TEMPERATURE` | `0.2`                      | Low, because the output must parse as JSON. |
+### Provenance and fallback
 
-The API reads `.env` itself — no dotenv dependency and no shell exports needed. Real environment variables take precedence over the file.
-
-### How the fallback works
-
-`ResilientReasoningAdapter` wraps the IFM adapter and the deterministic mock. It falls back to the mock on a missing key, a network error, a timeout, any non-2xx response, or output that fails validation. Every response carries a `source`:
+Every reasoning result carries a `source`:
 
 ```json
-{ "provider": "ifm", "model": "IFM/K2-Horizon-375B-A23B", "degraded": false }
+{ "provider": "gemini", "model": "gemini-2.0-flash", "degraded": false }
 ```
 
-`degraded: true` means IFM was configured and tried, and the mock answered instead; `warning` then carries the reason. The interface shows the same label on each card, so a judge can always see which answers came from the model. Model output can never mutate world state directly: severities must match the domain enum, incident IDs are checked against the scenario, confidence is clamped, and unknown IDs are dropped.
+`degraded: true` means Gemini was configured and tried, and the deterministic
+mock answered instead; `warning` carries the reason. Fallback covers a missing
+key, network error, timeout, non-2xx response, safety block, and output that
+fails validation. The UI shows the provider on every card.
+
+Advice is memoised against the scenario revision it analyzed, so repeated UI
+polling at an unchanged revision calls no model at all. A command advances the
+revision and retires the cached advice.
+
+### IFM / K2 development tooling
+
+The IFM client is retained for development and is **never invoked for chiefs**:
+
+```bash
+npm run k2 -- "your prompt"     # one-shot chat with an IFM model
+npm run ifm:check               # verify an IFM key end to end
+```
+
+These need `IFM_API_KEY`; they are unrelated to the chiefs and to world state.
 
 ## Two-minute demo flow
 

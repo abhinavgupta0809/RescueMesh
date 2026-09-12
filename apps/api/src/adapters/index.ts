@@ -1,5 +1,5 @@
-import { loadEnvFile, readIfmConfig, type IfmConfig } from '../config.js';
-import { IfmClient, IfmReasoningAdapter, type FetchLike } from './ifm.js';
+import { loadEnvFile, readGeminiConfig, type GeminiConfig } from '../config.js';
+import { GeminiClient, GeminiReasoningAdapter, type FetchLike } from './gemini.js';
 import {
   MockAllocationAdapter,
   MockEdgeIntelligenceAdapter,
@@ -13,10 +13,19 @@ import { ResilientReasoningAdapter } from './reasoning.js';
 
 export type Adapters = ReturnType<typeof createAdapters>;
 
-export const createAdapters = (config: IfmConfig | null, fetchImpl?: FetchLike) => ({
+/**
+ * Gemini powers the five chiefs. When no Gemini key is present the
+ * deterministic mock answers instead, with visible provenance.
+ *
+ * The IFM/K2 client is deliberately NOT wired here: it is retained as
+ * development tooling (`npm run k2`, `npm run ifm:check`) and is never invoked
+ * for chief reasoning.
+ */
+export const createAdapters = (config: GeminiConfig | null, fetchImpl?: FetchLike) => ({
   reasoning: new ResilientReasoningAdapter(
-    config ? new IfmReasoningAdapter(new IfmClient(config, fetchImpl)) : null,
-    new MockReasoningAdapter()
+    config ? new GeminiReasoningAdapter(new GeminiClient(config, fetchImpl)) : null,
+    new MockReasoningAdapter(),
+    'gemini'
   ),
   allocation: new MockAllocationAdapter(),
   worldState: new MockWorldStateStore(),
@@ -26,11 +35,12 @@ export const createAdapters = (config: IfmConfig | null, fetchImpl?: FetchLike) 
   edge: new MockEdgeIntelligenceAdapter()
 });
 
-/** Reads `.env` once at startup so `IFM_API_KEY=...` is the only setup step. */
+/** Reads `.env` once at startup so pasting a key is the only setup step. */
 export const envFile = loadEnvFile();
-export const ifmConfig = readIfmConfig();
-export const adapters = createAdapters(ifmConfig);
+export const geminiConfig = readGeminiConfig();
+export const adapters = createAdapters(geminiConfig);
 
 export * from './contracts.js';
-export * from './reasoning.js';
-export { IfmClient, IfmError, IfmReasoningAdapter, ROLE_TITLES } from './ifm.js';
+export { ResilientReasoningAdapter } from './reasoning.js';
+export { GeminiClient, GeminiError, GeminiReasoningAdapter } from './gemini.js';
+export { ROLE_TITLES, roleBriefText, roleContext } from './prompts.js';

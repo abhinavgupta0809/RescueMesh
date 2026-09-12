@@ -14,7 +14,8 @@
   "dependencies": {
     "@rescuemesh/shared": "*",
     "cors": "^2.8.5",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "@rescuemesh/engine": "*"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",

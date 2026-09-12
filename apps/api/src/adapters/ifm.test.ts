@@ -1,14 +1,8 @@
 import { pittsburghFloodScenario } from '@rescuemesh/shared';
 import { describe, expect, it, vi } from 'vitest';
 import type { IfmConfig } from '../config.js';
-import {
-  extractJsonObject,
-  IfmClient,
-  IfmError,
-  IfmReasoningAdapter,
-  roleContext,
-  type FetchLike
-} from './ifm.js';
+import { IfmClient, IfmError, IfmReasoningAdapter, type FetchLike } from './ifm.js';
+import { extractJsonObject, roleContext } from './prompts.js';
 
 const config: IfmConfig = {
   apiKey: 'IFM-test-key',
@@ -30,17 +24,17 @@ const replyWith = (content: string, finishReason = 'stop'): FetchLike =>
 
 describe('extractJsonObject', () => {
   it('reads a bare object', () => {
-    expect(extractJsonObject('{"severity":"high"}')).toEqual({ severity: 'high' });
+    expect(extractJsonObject('{"severity":"high"}', IfmError)).toEqual({ severity: 'high' });
   });
 
   it('reads an object inside a fenced block with prose around it', () => {
     const raw =
       'Here is the draft:\n```json\n{"title":"Water rescue","nested":{"a":1}}\n```\nDone.';
-    expect(extractJsonObject(raw)).toEqual({ title: 'Water rescue', nested: { a: 1 } });
+    expect(extractJsonObject(raw, IfmError)).toEqual({ title: 'Water rescue', nested: { a: 1 } });
   });
 
   it('ignores braces inside strings', () => {
-    expect(extractJsonObject('{"note":"a } brace"}')).toEqual({ note: 'a } brace' });
+    expect(extractJsonObject('{"note":"a } brace"}', IfmError)).toEqual({ note: 'a } brace' });
   });
 
   it('takes the answer after a reasoning preamble that contains braces', () => {
@@ -49,13 +43,13 @@ describe('extractJsonObject', () => {
       'Draft: {"summary":"draft","confidence":0.1} — no, revise.',
       '{"summary":"final answer","confidence":0.9}'
     ].join('\n');
-    expect(extractJsonObject(raw)).toEqual({ summary: 'final answer', confidence: 0.9 });
+    expect(extractJsonObject(raw, IfmError)).toEqual({ summary: 'final answer', confidence: 0.9 });
   });
 
   it('rejects replies with no object or broken JSON', () => {
-    expect(() => extractJsonObject('no json here')).toThrow(IfmError);
-    expect(() => extractJsonObject('{"a": }')).toThrow(IfmError);
-    expect(() => extractJsonObject('{"a": 1')).toThrow(IfmError);
+    expect(() => extractJsonObject('no json here', IfmError)).toThrow(IfmError);
+    expect(() => extractJsonObject('{"a": }', IfmError)).toThrow(IfmError);
+    expect(() => extractJsonObject('{"a": 1', IfmError)).toThrow(IfmError);
   });
 });
 

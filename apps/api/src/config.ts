@@ -112,3 +112,50 @@ export const readIfmConfig = (env: NodeJS.ProcessEnv = process.env): IfmConfig |
     temperature: numberFrom(env.IFM_TEMPERATURE, IFM_DEFAULTS.temperature, 0, 2)
   };
 };
+
+export interface GeminiConfig {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  timeoutMs: number;
+  maxOutputTokens: number;
+  temperature: number;
+}
+
+/** Defaults for the Gemini generateContent API. */
+export const GEMINI_DEFAULTS = {
+  baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+  model: 'gemini-2.0-flash',
+  timeoutMs: 20_000,
+  maxOutputTokens: 1_024,
+  temperature: 0.2
+} as const;
+
+const GEMINI_PLACEHOLDERS = new Set([
+  'aiza...',
+  'your-key-here',
+  'paste-your-key-here',
+  'changeme'
+]);
+
+/**
+ * Returns `null` when no usable Gemini key is present, which selects the
+ * deterministic mock path for the chiefs. Read on the backend only.
+ */
+export const readGeminiConfig = (env: NodeJS.ProcessEnv = process.env): GeminiConfig | null => {
+  const apiKey = (env.GEMINI_API_KEY ?? '').trim();
+  if (!apiKey || GEMINI_PLACEHOLDERS.has(apiKey.toLowerCase())) return null;
+  return {
+    apiKey,
+    baseUrl: trimTrailingSlash((env.GEMINI_BASE_URL ?? '').trim() || GEMINI_DEFAULTS.baseUrl),
+    model: (env.GEMINI_MODEL ?? '').trim() || GEMINI_DEFAULTS.model,
+    timeoutMs: numberFrom(env.GEMINI_TIMEOUT_MS, GEMINI_DEFAULTS.timeoutMs, 1_000, 120_000),
+    maxOutputTokens: numberFrom(
+      env.GEMINI_MAX_OUTPUT_TOKENS,
+      GEMINI_DEFAULTS.maxOutputTokens,
+      64,
+      8_192
+    ),
+    temperature: numberFrom(env.GEMINI_TEMPERATURE, GEMINI_DEFAULTS.temperature, 0, 2)
+  };
+};

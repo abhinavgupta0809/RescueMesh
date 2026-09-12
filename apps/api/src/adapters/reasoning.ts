@@ -6,28 +6,39 @@ import type {
   Scenario
 } from '@rescuemesh/shared';
 import type { ReasoningAdapter } from './contracts.js';
-import { IfmError } from './ifm.js';
+import { GeminiError } from './gemini.js';
 
 const describe = (error: unknown): string => {
-  if (error instanceof IfmError) {
+  if (error instanceof GeminiError) {
     return error.detail ? `${error.message} (${error.stage}: ${error.detail})` : error.message;
   }
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) {
+    const detail = (error as { detail?: unknown }).detail;
+    return typeof detail === 'string' ? `${error.message} (${detail})` : error.message;
+  }
+  return String(error);
 };
 
 /**
- * Tries the IFM-backed adapter and falls back to the deterministic mock on any
- * failure — missing key, network error, timeout, HTTP error, or output that does
- * not validate. Malformed model output can therefore never reach world state.
+ * Tries the live provider and falls back to the deterministic mock on any
+ * failure — missing key, network error, timeout, HTTP error, safety block, or
+ * output that fails validation. Model output therefore can never reach the UI
+ * unlabelled, and can never reach world state at all: only the simulation
+ * engine mutates state, and it never consults a model.
  */
 export class ResilientReasoningAdapter implements ReasoningAdapter {
   constructor(
     private readonly primary: (ReasoningAdapter & { model: string }) | null,
-    private readonly fallback: ReasoningAdapter
+    private readonly fallback: ReasoningAdapter,
+    private readonly providerName: ReasoningSource['provider'] = 'gemini'
   ) {}
 
   get configured(): boolean {
     return this.primary !== null;
+  }
+
+  get provider(): ReasoningSource['provider'] {
+    return this.primary ? this.providerName : 'mock';
   }
 
   get model(): string {
@@ -41,14 +52,16 @@ export class ResilientReasoningAdapter implements ReasoningAdapter {
         return {
           value,
           source: {
-            provider: 'ifm',
+            provider: this.providerName,
             model: this.primary.model,
             degraded: false
           } satisfies ReasoningSource
         };
       } catch (error: unknown) {
         const warning = describe(error);
-        console.warn(`[rescuemesh] IFM reasoning failed, using deterministic mock: ${warning}`);
+        console.warn(
+          `[rescuemesh] ${this.providerName} reasoning failed, using deterministic mock: ${warning}`
+        );
         return {
           value: await run(this.fallback),
           source: {

@@ -173,13 +173,28 @@ HTTP status is `200` for `ok: true`, `400` for `validation_failed` / `unknown_co
 
 Polling: the client keeps the last `revision` it saw and polls `GET /api/world-state?since=<revision>` every 2–5 seconds. `upToDate: true` means nothing changed. A `since` older than the server's event window returns the full `scenario` instead of a delta.
 
+## 4a. Runtime flow
+
+1. The UI submits a typed command to `POST /api/commands`.
+2. The simulation engine validates and applies it. It is the only writer.
+3. The backend exposes the authoritative scenario and events.
+4. Gemini chiefs analyze a role-scoped slice of that scenario and return validated advice.
+5. The user reviews a proposed plan.
+6. Approval returns through the engine, which re-checks live state before assigning resources.
+
 ## 5. Provenance and mock visibility
 
-Every reasoning result carries a `ReasoningSource`:
+Every reasoning result carries a `ReasoningSource`, plus the revision it analyzed:
 
 ```ts
-{ provider: 'ifm' | 'gemini' | 'mock', model: string, degraded: boolean, warning?: string }
+{ provider: 'gemini' | 'mock', model: string, degraded: boolean, warning?: string }
 ```
+
+`RecommendationResponse.analyzedRevision` names the scenario revision the advice
+was computed against; advice older than the current revision is stale. Advice is
+memoised per revision, so repeated polling makes no model calls, and a command
+retires the cache. `provider: 'ifm'` remains in the union for the retained
+development tooling and is never used for chiefs.
 
 - `degraded: true` means a live provider was configured and tried, and the deterministic mock answered instead. `warning` carries the reason.
 - The interface must show the provider on every card that came from a model. A judge should never have to guess whether an answer was generated or seeded.
@@ -216,19 +231,24 @@ Three properties are behavioural rather than structural, so they are asserted by
 
 ## 7. Ownership
 
-| Area                                           | Owner          |
-| ---------------------------------------------- | -------------- |
-| `packages/shared`, `docs/`, integration review | Claude         |
-| `apps/web` and matching the UI reference       | Codex          |
-| `apps/api` command handlers, in-memory store   | K2             |
-| Five in-app chiefs behind `ReasoningAdapter`   | Gemini (later) |
+| Area                                                          | Owner  |
+| ------------------------------------------------------------- | ------ |
+| `packages/shared`, `docs/`, backend integration, verification | Claude |
+| `apps/web` and matching the UI reference                      | Codex  |
+| `packages/engine` — simulation, transitions, determinism      | K2     |
+| Five in-app chiefs behind `ReasoningAdapter`                  | Gemini |
+
+**K2 owns the simulation engine.** That means the deterministic simulation code,
+not a hosted model in the request path: no state transition consults any model.
+**Gemini is advisory only** — a chief's output is a `pending` recommendation
+carrying the revision it analyzed, and it reaches world state only if a human
+approves a plan, which the engine then re-validates against live state.
 
 Rules for everyone: do not change `packages/shared` without updating this document. Do not add a required field to `Scenario` without seeding it. Do not make an external service mandatory. Do not print or log secret values.
 
 ## 8. Open items
 
-- Command handlers for all eight commands are **not yet implemented** — `POST /api/commands` does not exist yet. The contract, types, and invariants are ready for K2 to build against.
-- `GET /api/world-state` does not yet match `WorldStateResponse`: it currently returns `{ simulatedTime, status, assignments, routes, events }` with no `revision`, `upToDate`, or `since` support. K2 owns bringing it into line; the web client should not depend on the current shape.
-- Incident-raising detail for `scenario.trigger_flood` (how many synthetic incidents per intensity level) is deliberately left to the backend, constrained only by I1–I12.
-- Dispatch and completion transitions (`dispatched` → `complete`) are out of scope for these eight steps.
-- `ReasoningAdapter` currently has an IFM implementation and the deterministic mock. A Gemini implementation slots in behind the same interface with no contract change.
+- Dispatch and completion transitions (`dispatched` → `complete`) are still out of scope.
+- Persistence is in-memory: a server restart returns to the seed.
+- Incident-raising detail for `scenario.trigger_flood` (how many synthetic incidents per intensity level) is deliberately left to the backend, constrained only by I1–I13.
+- `ReasoningAdapter` is implemented by Gemini (chiefs) and the deterministic mock. The IFM client is retained as development tooling only and is never invoked for chiefs.

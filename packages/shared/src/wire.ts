@@ -49,8 +49,17 @@ export interface ParseReportResponse {
 export interface RecommendationResponse {
   recommendation: AgentRecommendation;
   source: ReasoningSource;
+  /**
+   * The scenario revision this advice was computed against. Advice older than
+   * the current revision is stale and should be labelled as such in the UI.
+   */
+  analyzedRevision: number;
 }
 
 export interface RecommendationsResponse {
+  /** The revision every item in this response analyzed. */
+  revision: number;
+  /** True when the set was served from cache without calling a model. */
+  cached: boolean;
   items: RecommendationResponse[];
 }

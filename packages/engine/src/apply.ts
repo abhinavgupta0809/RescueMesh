@@ -209,7 +209,10 @@ export const applyCommand = (
     );
   }
 
-  const response: CommandSuccess<CommandType> = {
+  // CommandSuccess is a discriminated union keyed on `type`, which is what lets
+  // callers narrow `data`. The reducer necessarily builds it generically, so the
+  // type/data pairing is enforced by `route()` above rather than here.
+  const response = {
     ok: true,
     commandId: command.commandId,
     type: command.type,
@@ -218,7 +221,7 @@ export const applyCommand = (
     duplicate: false,
     data: outcome.data,
     events
-  };
+  } as CommandSuccess<CommandType>;
   // The reset command is deliberately not recorded: it clears the dedup ledger,
   // so recording it would leave exactly one stale entry behind.
   if (!isReset) draft.appliedCommands[command.commandId] = response;

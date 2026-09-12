@@ -189,19 +189,27 @@ export interface CommandError {
   details?: Record<string, unknown>;
 }
 
-export interface CommandSuccess<TType extends CommandType = CommandType> {
-  ok: true;
-  commandId: string;
-  type: TType;
-  /** Revision after applying. Unchanged from the request when `duplicate`. */
-  revision: number;
-  appliedAt: string;
-  /** True when this `commandId` had already been applied; nothing changed. */
-  duplicate: boolean;
-  data: CommandResultMap[TType];
-  /** Events appended by this command, in order. Empty when `duplicate`. */
-  events: WorldStateEvent[];
-}
+/**
+ * Distributed over CommandType so that narrowing on `type` also narrows `data`.
+ * Written as a mapped type rather than an interface for exactly that reason: an
+ * interface with `data: CommandResultMap[TType]` widens to a union of every
+ * result shape and gives callers no way to discriminate.
+ */
+export type CommandSuccess<TType extends CommandType = CommandType> = {
+  [K in CommandType]: {
+    ok: true;
+    commandId: string;
+    type: K;
+    /** Revision after applying. Unchanged from the request when `duplicate`. */
+    revision: number;
+    appliedAt: string;
+    /** True when this `commandId` had already been applied; nothing changed. */
+    duplicate: boolean;
+    data: CommandResultMap[K];
+    /** Events appended by this command, in order. Empty when `duplicate`. */
+    events: WorldStateEvent[];
+  };
+}[TType];
 
 export interface CommandFailure {
   ok: false;

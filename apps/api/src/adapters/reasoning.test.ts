@@ -1,16 +1,16 @@
 import { pittsburghFloodScenario, type AgentRecommendation } from '@rescuemesh/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReasoningAdapter } from './contracts.js';
-import { IfmError } from './ifm.js';
+import { GeminiError } from './gemini.js';
 import { MockReasoningAdapter } from './mock.js';
 import { ResilientReasoningAdapter } from './reasoning.js';
 
 const liveAdapter = (
   overrides: Partial<ReasoningAdapter> = {}
 ): ReasoningAdapter & { model: string } => ({
-  model: 'IFM/K2-Horizon-375B-A23B',
+  model: 'gemini-2.0-flash',
   parseReport: async () => ({
-    title: 'K2 draft',
+    title: 'Gemini draft',
     description: 'From the model.',
     severity: 'high' as const
   }),
@@ -32,7 +32,7 @@ describe('ResilientReasoningAdapter', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
-  it('reports mock provenance when no key is configured', async () => {
+  it('reports mock provenance when no Gemini key is configured', async () => {
     const adapter = new ResilientReasoningAdapter(null, new MockReasoningAdapter());
     expect(adapter.configured).toBe(false);
     expect(adapter.model).toBe('deterministic-mock');
@@ -42,15 +42,15 @@ describe('ResilientReasoningAdapter', () => {
     expect(value.severity).toBe('critical');
   });
 
-  it('uses IFM and reports it as the source when the call succeeds', async () => {
+  it('uses Gemini and reports it as the source when the call succeeds', async () => {
     const adapter = new ResilientReasoningAdapter(liveAdapter(), new MockReasoningAdapter());
     expect(adapter.configured).toBe(true);
 
     const { value, source } = await adapter.parseReportWithSource('water over the road');
-    expect(value.title).toBe('K2 draft');
+    expect(value.title).toBe('Gemini draft');
     expect(source).toEqual({
-      provider: 'ifm',
-      model: 'IFM/K2-Horizon-375B-A23B',
+      provider: 'gemini',
+      model: 'gemini-2.0-flash',
       degraded: false
     });
   });
@@ -59,7 +59,11 @@ describe('ResilientReasoningAdapter', () => {
     const adapter = new ResilientReasoningAdapter(
       liveAdapter({
         parseReport: async () => {
-          throw new IfmError('http', 'IFM API returned 401 Unauthorized', 'invalid api key');
+          throw new GeminiError(
+            'http',
+            'Gemini API returned 401 Unauthorized',
+            'API key not valid'
+          );
         }
       }),
       new MockReasoningAdapter()
@@ -70,14 +74,14 @@ describe('ResilientReasoningAdapter', () => {
     expect(source.provider).toBe('mock');
     expect(source.degraded).toBe(true);
     expect(source.warning).toContain('401');
-    expect(source.warning).toContain('invalid api key');
+    expect(source.warning).toContain('API key not valid');
   });
 
   it('falls back for recommendations too, so bad output never reaches world state', async () => {
     const adapter = new ResilientReasoningAdapter(
       liveAdapter({
         recommend: async () => {
-          throw new IfmError('shape', 'Model reply was not valid JSON');
+          throw new GeminiError('shape', 'Model reply was not valid JSON');
         }
       }),
       new MockReasoningAdapter()
