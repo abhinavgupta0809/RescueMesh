@@ -208,3 +208,11 @@ This checks formatting, lint rules, TypeScript across all workspaces, seed/API t
 The five chiefs run on Gemini behind `ReasoningAdapter`; the eight-step command flow and the recorded scenario script run end to end through the deterministic engine, with no model in any state transition. K2/IFM has no runtime role and is reserved for a separate submission.
 
 The next sensible slices, in order: persist world state behind `WorldStateStore` so a restart does not return to the seed; retire `apps/web/src/mock-client.ts` now that the engine covers the same behaviour; then dispatch and completion transitions (`dispatched` -> `complete`).
+
+## License
+
+[MIT](LICENSE).
+
+RescueMesh is a hackathon simulation. It is not an emergency service, a dispatch
+system, or a source of operational guidance, and every incident, capacity,
+travel estimate and forecast in it is synthetic.
